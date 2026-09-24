@@ -1,0 +1,6 @@
+{
+  "name": "WorkPulse – Attendance & Payroll Management System",
+  "description": "Enterprise-grade Attendance, Leave, Shift, and Payroll Management System with real-time tracking, granular analytics, and role-based access control.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
