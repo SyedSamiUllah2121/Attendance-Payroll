@@ -239,11 +239,19 @@ export interface PayrollSettings {
   socialSecurityRate?: number;
 }
 
+export interface AnnualLeavePolicy {
+  monthlyDays: number[]; // 12 entries, Jan..Dec: days credited for that month
+  creditTiming: 'start' | 'end'; // credit when the month begins or once it is completed
+  joiningCutoffDay: number; // joined on/before this day-of-month -> that month counts
+  maxCarryForward: number; // max unused days carried into next year (0 = reset yearly)
+}
+
 export interface AppSettings {
   company: CompanySettings;
   attendance: AttendanceSettings;
   payroll: PayrollSettings;
   leaveQuotas: Record<LeaveType, number>;
+  annualLeavePolicy?: AnnualLeavePolicy;
   leaves?: {
     annual: number;
     sick: number;

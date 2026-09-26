@@ -58,6 +58,12 @@ export const defaultSettings: AppSettings = {
     Casual: 8,
     Unpaid: 999,
   },
+  annualLeavePolicy: {
+    monthlyDays: [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
+    creditTiming: 'end',
+    joiningCutoffDay: 15,
+    maxCarryForward: 0,
+  },
 };
 
 export const defaultShifts: Shift[] = [

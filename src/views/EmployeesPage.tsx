@@ -26,6 +26,12 @@ import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
+import { LeaveRecordView } from '../components/leave/LeaveRecordView';
+import {
+  computeLeaveRecord,
+  formatService,
+  getAnnualLeavePolicy,
+} from '../utils/annualLeaveEngine';
 
 interface EmployeesPageProps {
   onOpenPayslip?: (employeeId: string) => void;
@@ -52,7 +58,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [viewingEmployee, setViewingEmployee] = useState<Employee | null>(null);
-  const [profileTab, setProfileTab] = useState<'overview' | 'attendance' | 'leaves' | 'payslips' | 'documents'>('overview');
+  const [profileTab, setProfileTab] = useState<'overview' | 'attendance' | 'leaves' | 'annual' | 'payslips' | 'documents'>('overview');
   const [deactivatingEmployee, setDeactivatingEmployee] = useState<Employee | null>(null);
 
   // Departments list
@@ -81,6 +87,10 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
   const loadEmployees = () => {
     setEmployees(storageService.getEmployees());
   };
+
+  const viewingRecord = viewingEmployee
+    ? computeLeaveRecord(viewingEmployee, storageService.getLeaves(), getAnnualLeavePolicy(settings))
+    : undefined;
 
   const handleOpenAdd = () => {
     // Generate next ID
@@ -805,7 +815,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
           maxWidth="3xl"
         >
           {/* Tab Navigation */}
-          <div className="flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800 pb-2 mb-4">
+          <div className="flex flex-wrap items-center gap-1 border-b border-neutral-200 dark:border-neutral-800 pb-2 mb-4">
             <button
               onClick={() => setProfileTab('overview')}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
@@ -835,6 +845,16 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
               }`}
             >
               Leaves History
+            </button>
+            <button
+              onClick={() => setProfileTab('annual')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+                profileTab === 'annual'
+                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300'
+                  : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+              }`}
+            >
+              Annual Leave Record
             </button>
             <button
               onClick={() => setProfileTab('payslips')}
@@ -878,6 +898,9 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                   <span className="text-neutral-400">Joining Date</span>
                   <p className="font-semibold text-neutral-900 dark:text-neutral-100 mt-0.5">
                     {viewingEmployee.joiningDate}
+                  </p>
+                  <p className="text-[11px] text-neutral-400">
+                    {formatService(viewingRecord!.serviceMonths)} worked
                   </p>
                 </div>
                 <div>
@@ -1014,6 +1037,11 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                   ))}
               </div>
             </div>
+          )}
+
+          {/* Annual leave record */}
+          {profileTab === 'annual' && viewingRecord && (
+            <LeaveRecordView record={viewingRecord} joiningDate={viewingEmployee.joiningDate} />
           )}
 
           {/* Tab 4: Payslips */}

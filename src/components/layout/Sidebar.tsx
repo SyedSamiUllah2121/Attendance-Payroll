@@ -15,6 +15,7 @@ import {
   UserCheck,
   CalendarCheck,
   Building2,
+  CalendarRange,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
@@ -65,6 +66,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'leaves',
       label: 'Leave Management',
       icon: CalendarCheck,
+      roles: ['admin', 'hr', 'employee'],
+    },
+    {
+      id: 'annual-leave',
+      label: 'Annual Leave',
+      icon: CalendarRange,
       roles: ['admin', 'hr', 'employee'],
     },
     {

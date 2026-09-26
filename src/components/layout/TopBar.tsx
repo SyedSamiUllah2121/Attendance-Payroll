@@ -110,6 +110,7 @@ export const TopBar: React.FC<TopBarProps> = ({
     dashboard: 'Dashboard',
     attendance: 'Attendance Management',
     leaves: 'Leave Management',
+    'annual-leave': 'Annual Leave',
     employees: 'Employee Directory',
     payroll: 'Payroll Management',
     payslips: 'Payslips',

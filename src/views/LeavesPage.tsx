@@ -18,6 +18,7 @@ import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { differenceInBusinessDays, parseISO, addDays } from 'date-fns';
+import { computeAnnualLeave, getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
 
 export const LeavesPage: React.FC = () => {
   const { user, isHR, isEmployee } = useAuth();
@@ -96,11 +97,20 @@ export const LeavesPage: React.FC = () => {
     .filter((l) => l.leaveType === 'Casual')
     .reduce((acc, l) => acc + l.daysCount, 0);
 
-  const annualQuota = settings.leaves?.annual ?? settings.leaveQuotas?.Annual ?? 14;
+  // Annual leave is earned monthly; see the Annual Leave module.
+  const currentEmp = employees.find((e) => e.id === currentEmpId);
+  const annualSummary = currentEmp
+    ? computeAnnualLeave(currentEmp, leaves, getAnnualLeavePolicy(settings), new Date().getFullYear())
+    : undefined;
+  const annualQuota = annualSummary
+    ? annualSummary.carriedForward + annualSummary.accrued
+    : settings.leaves?.annual ?? settings.leaveQuotas?.Annual ?? 14;
   const sickQuota = settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10;
   const casualQuota = settings.leaves?.casual ?? settings.leaveQuotas?.Casual ?? 8;
 
-  const remAnnual = Math.max(0, annualQuota - usedAnnual);
+  const remAnnual = annualSummary
+    ? Math.max(0, annualSummary.balance)
+    : Math.max(0, annualQuota - usedAnnual);
   const remSick = Math.max(0, sickQuota - usedSick);
   const remCasual = Math.max(0, casualQuota - usedCasual);
 
@@ -235,7 +245,7 @@ export const LeavesPage: React.FC = () => {
             <span className="text-2xl font-bold font-mono text-indigo-600 dark:text-indigo-400">
               {remAnnual}
             </span>
-            <span className="text-xs text-neutral-400">/ {annualQuota} days</span>
+            <span className="text-xs text-neutral-400">/ {annualQuota} earned</span>
           </div>
           <div className="w-full h-1.5 rounded-full bg-neutral-100 dark:bg-neutral-800 mt-3 overflow-hidden">
             <div

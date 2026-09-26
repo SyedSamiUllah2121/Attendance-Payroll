@@ -8,6 +8,7 @@ import { DashboardPage } from './views/DashboardPage';
 import { EmployeesPage } from './views/EmployeesPage';
 import { AttendancePage } from './views/AttendancePage';
 import { LeavesPage } from './views/LeavesPage';
+import { AnnualLeavePage } from './views/AnnualLeavePage';
 import { PayrollPage } from './views/PayrollPage';
 import { PayslipsPage } from './views/PayslipsPage';
 import { LoansPage } from './views/LoansPage';
@@ -43,6 +44,7 @@ const AppContent: React.FC = () => {
       {currentPage === 'employees' && <EmployeesPage />}
       {currentPage === 'attendance' && <AttendancePage />}
       {currentPage === 'leaves' && <LeavesPage />}
+      {currentPage === 'annual-leave' && <AnnualLeavePage />}
       {currentPage === 'payroll' && <PayrollPage onOpenPayslip={handleOpenPayslip} />}
       {currentPage === 'payslips' && (
         <PayslipsPage
