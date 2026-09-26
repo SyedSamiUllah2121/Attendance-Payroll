@@ -40,7 +40,7 @@ const ProductShowcase: React.FC = () => {
   const circumference = 2 * Math.PI * 34;
 
   return (
-    <div className="relative h-full w-full overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800 p-10 xl:p-14 flex flex-col">
+    <div className="relative h-full w-full overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800 p-8 xl:p-10 flex flex-col">
       {/* Background texture */}
       <div
         className="absolute inset-0 opacity-[0.15]"
@@ -57,7 +57,7 @@ const ProductShowcase: React.FC = () => {
         <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 border border-white/20 text-[11px] font-semibold text-indigo-100 backdrop-blur">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Attendance · Leave · Payroll
         </span>
-        <h2 className="mt-5 text-3xl xl:text-4xl font-bold leading-tight text-white tracking-tight">
+        <h2 className="mt-4 text-2xl xl:text-3xl 2xl:text-4xl font-bold leading-tight text-white tracking-tight">
           Your whole workforce, in one calm dashboard.
         </h2>
         <p className="mt-3 text-sm text-indigo-100/80 leading-relaxed">
@@ -66,7 +66,7 @@ const ProductShowcase: React.FC = () => {
       </div>
 
       {/* Floating product cards */}
-      <div className="relative z-10 flex-1 min-h-[360px] mt-8">
+      <div className="relative z-10 flex-1 min-h-[300px] mt-6">
         {/* Attendance donut */}
         <div className="absolute left-0 top-4 w-64 rounded-2xl bg-white/95 dark:bg-neutral-900/95 p-5 shadow-2xl shadow-indigo-950/40 animate-float">
           <p className="text-xs font-semibold text-neutral-500">Today's attendance</p>
@@ -171,7 +171,7 @@ const ProductShowcase: React.FC = () => {
       </div>
 
       {/* Footer stats */}
-      <div className="relative z-10 mt-6 grid grid-cols-3 gap-4 border-t border-white/15 pt-6">
+      <div className="relative z-10 mt-4 grid grid-cols-3 gap-4 border-t border-white/15 pt-4 [@media(max-height:760px)]:hidden">
         {[
           ['5 roles', 'Access control'],
           ['2.5 days', 'Leave per month'],
@@ -236,9 +236,9 @@ export const LoginPage: React.FC = () => {
     'w-full h-11 pl-10 pr-3 text-sm bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 transition-shadow focus:outline-hidden focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/15';
 
   return (
-    <div className="min-h-screen bg-white dark:bg-neutral-950 grid lg:grid-cols-2">
+    <div className="min-h-screen lg:h-dvh lg:overflow-hidden bg-white dark:bg-neutral-950 grid lg:grid-cols-2">
       {/* Sign-in form */}
-      <div className="flex flex-col px-6 sm:px-12 py-8">
+      <div className="flex flex-col px-6 sm:px-12 py-6 lg:h-dvh lg:overflow-y-auto">
         <div className="flex items-center gap-2.5 animate-fade-up">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-lg shadow-indigo-600/30">
             <Building2 className="w-5 h-5" />
@@ -251,7 +251,7 @@ export const LoginPage: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex-1 flex items-center justify-center py-10">
+        <div className="flex-1 flex items-center justify-center py-6">
           <div className="w-full max-w-sm">
             <div className="animate-fade-up" style={{ animationDelay: '60ms' }}>
               <h1 className="text-3xl font-bold tracking-tight text-neutral-900 dark:text-neutral-100">
@@ -262,7 +262,7 @@ export const LoginPage: React.FC = () => {
               </p>
             </div>
 
-            <form onSubmit={handleSubmit} className="mt-8 space-y-4 animate-fade-up" style={{ animationDelay: '120ms' }} noValidate>
+            <form onSubmit={handleSubmit} className="mt-6 space-y-3.5 animate-fade-up" style={{ animationDelay: '120ms' }} noValidate>
               <div>
                 <label htmlFor="login-id" className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1.5">
                   Email or username
@@ -343,7 +343,7 @@ export const LoginPage: React.FC = () => {
             </form>
 
             {demoAccounts.length > 0 && (
-              <div className="mt-8 animate-fade-up" style={{ animationDelay: '180ms' }}>
+              <div className="mt-6 animate-fade-up" style={{ animationDelay: '180ms' }}>
                 <div className="flex items-center gap-3">
                   <div className="h-px flex-1 bg-neutral-200 dark:bg-neutral-800" />
                   <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider">
@@ -351,7 +351,7 @@ export const LoginPage: React.FC = () => {
                   </span>
                   <div className="h-px flex-1 bg-neutral-200 dark:bg-neutral-800" />
                 </div>
-                <div className="mt-4 grid grid-cols-2 gap-2">
+                <div className="mt-3 grid grid-cols-2 gap-2">
                   {demoAccounts.map((acc) => {
                     const Icon = ROLE_ICONS[acc.role];
                     return (
@@ -361,16 +361,16 @@ export const LoginPage: React.FC = () => {
                         disabled={submitting}
                         onClick={() => handleTestAccount(acc.email, acc.password)}
                         title={`Sign in as ${acc.email} / ${acc.password}`}
-                        className={`group flex items-center gap-2 px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-left hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/30 transition-colors cursor-pointer ${
+                        className={`group flex items-center gap-2 px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-left hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/30 transition-colors cursor-pointer ${
                           acc.role === 'manager' ? 'col-span-2' : ''
                         }`}
                       >
                         <Icon className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                        <span className="min-w-0">
-                          <span className="block text-xs font-semibold text-neutral-700 dark:text-neutral-200 truncate">
+                        <span className="min-w-0 flex items-baseline gap-1.5">
+                          <span className="text-xs font-semibold text-neutral-700 dark:text-neutral-200 truncate">
                             {ROLE_LABELS[acc.role]}
                           </span>
-                          <span className="block text-[10px] font-mono text-neutral-400 truncate">{acc.email}</span>
+                          <span className="text-[10px] font-mono text-neutral-400 truncate">{acc.email}</span>
                         </span>
                         <ArrowRight className="w-3.5 h-3.5 ml-auto text-neutral-300 group-hover:text-indigo-500 transition-colors shrink-0" />
                       </button>
@@ -386,7 +386,7 @@ export const LoginPage: React.FC = () => {
       </div>
 
       {/* Illustration (large screens) */}
-      <div className="hidden lg:block p-3">
+      <div className="hidden lg:block p-3 h-dvh">
         <ProductShowcase />
       </div>
     </div>
