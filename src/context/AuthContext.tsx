@@ -1,121 +1,108 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Role, User } from '../types';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { User, UserAccount } from '../types';
+import { storageService } from '../services/storageService';
+import { defaultUserAccounts } from '../data/seedData';
+import { Permission, canOpenPage, normalizeRole, roleCan } from '../utils/permissions';
 
-export const DEMO_ACCOUNTS: { role: Role; email: string; pass: string; name: string; designation: string; department: string; employeeId?: string }[] = [
-  {
-    role: 'admin',
-    email: 'admin@workpulse.com',
-    pass: 'admin123',
-    name: 'Mustafa Zaidi',
-    designation: 'Managing Director / System Admin',
-    department: 'Executive',
-  },
-  {
-    role: 'hr',
-    email: 'hr@workpulse.com',
-    pass: 'hr123',
-    name: 'Sara Ahmed',
-    designation: 'HR Manager',
-    department: 'Human Resources',
-    employeeId: 'EMP-002',
-  },
-  {
-    role: 'employee',
-    email: 'ali.khan@workpulse.com',
-    pass: 'emp123',
-    name: 'Ali Khan',
-    designation: 'Senior Developer',
-    department: 'Engineering',
-    employeeId: 'EMP-001',
-  },
-];
+const SESSION_KEY = 'workpulse_active_user';
+
+/** Seeded accounts offered as one-click demo sign-ins (only while they exist and are active). */
+export const DEMO_ACCOUNT_IDS = defaultUserAccounts.map((a) => a.id);
+
+export const getDemoAccounts = (): UserAccount[] =>
+  storageService
+    .getUsers()
+    .filter((a) => DEMO_ACCOUNT_IDS.includes(a.id) && a.status === 'Active');
+
+const toSessionUser = (a: UserAccount): User => ({
+  id: a.id,
+  email: a.email,
+  name: a.name,
+  role: normalizeRole(a.role),
+  employeeId: a.employeeId,
+  designation: a.designation,
+  department: a.department,
+});
+
+export type LoginResult = { ok: true } | { ok: false; reason: 'invalid' | 'disabled' };
 
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
-  login: (email: string, pass: string) => boolean;
-  quickLogin: (role: Role) => void;
+  login: (email: string, pass: string) => LoginResult;
+  quickLogin: (accountId: string) => void;
   logout: () => void;
-  isAdmin: boolean;
-  isHR: boolean;
+  /** Re-read the signed-in account (after its role or details change). */
+  refreshUser: () => void;
+  can: (permission: Permission) => boolean;
+  canOpen: (page: string) => boolean;
+  isAdmin: boolean; // head manager
+  isHR: boolean; // any staff role (not a plain employee)
   isEmployee: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(() => {
-    if (typeof window === 'undefined') return null;
+/** Restore the saved session, but only if that account still exists and is active. */
+const restoreSession = (): User | null => {
+  if (typeof window === 'undefined') return null;
+  const saved = window.localStorage.getItem(SESSION_KEY);
+  if (!saved) return null;
+  try {
+    const parsed = JSON.parse(saved) as User;
+    const accounts = storageService.getUsers();
+    const account =
+      accounts.find((a) => a.id === parsed.id) ||
+      accounts.find((a) => a.email.toLowerCase() === parsed.email?.toLowerCase());
+    return account && account.status === 'Active' ? toSessionUser(account) : null;
+  } catch {
+    return null;
+  }
+};
 
-    const saved = window.localStorage.getItem('workpulse_active_user');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return null;
-      }
-    }
-    // Default to Admin for seamless review
-    const def = DEMO_ACCOUNTS[0];
-    return {
-      id: 'user-admin',
-      email: def.email,
-      name: def.name,
-      role: def.role,
-      designation: def.designation,
-      department: def.department,
-    };
-  });
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(restoreSession);
 
   useEffect(() => {
     if (user) {
-      window.localStorage.setItem('workpulse_active_user', JSON.stringify(user));
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify(user));
     } else {
-      window.localStorage.removeItem('workpulse_active_user');
+      window.localStorage.removeItem(SESSION_KEY);
     }
   }, [user]);
 
-  const login = (email: string, pass: string): boolean => {
-    const found = DEMO_ACCOUNTS.find(
-      (a) => a.email.toLowerCase() === email.toLowerCase().trim() && a.pass === pass.trim()
+  const signIn = (account: UserAccount) => {
+    const accounts = storageService.getUsers().map((a) =>
+      a.id === account.id ? { ...a, lastLoginAt: new Date().toISOString() } : a
     );
-    if (found) {
-      setUser({
-        id: `user-${found.role}`,
-        email: found.email,
-        name: found.name,
-        role: found.role,
-        designation: found.designation,
-        department: found.department,
-        employeeId: found.employeeId,
-      });
-      return true;
-    }
-    return false;
+    storageService.saveUsers(accounts);
+    setUser(toSessionUser(account));
   };
 
-  const quickLogin = (role: Role) => {
-    const found = DEMO_ACCOUNTS.find((a) => a.role === role);
-    if (found) {
-      setUser({
-        id: `user-${found.role}`,
-        email: found.email,
-        name: found.name,
-        role: found.role,
-        designation: found.designation,
-        department: found.department,
-        employeeId: found.employeeId,
-      });
-    }
+  const login = (email: string, pass: string): LoginResult => {
+    const account = storageService
+      .getUsers()
+      .find(
+        (a) => a.email.toLowerCase() === email.toLowerCase().trim() && a.password === pass.trim()
+      );
+    if (!account) return { ok: false, reason: 'invalid' };
+    if (account.status !== 'Active') return { ok: false, reason: 'disabled' };
+    signIn(account);
+    return { ok: true };
   };
 
-  const logout = () => {
-    setUser(null);
+  const quickLogin = (accountId: string) => {
+    const account = getDemoAccounts().find((a) => a.id === accountId);
+    if (account) signIn(account);
   };
 
-  const isAdmin = user?.role === 'admin';
-  const isHR = user?.role === 'hr' || user?.role === 'admin';
-  const isEmployee = user?.role === 'employee';
+  const logout = () => setUser(null);
+
+  const refreshUser = useCallback(() => setUser(restoreSession()), []);
+
+  const role = user?.role;
+  const can = (permission: Permission) => roleCan(role, permission);
+  const canOpen = (page: string) => canOpenPage(role, page);
 
   return (
     <AuthContext.Provider
@@ -125,9 +112,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         login,
         quickLogin,
         logout,
-        isAdmin,
-        isHR,
-        isEmployee,
+        refreshUser,
+        can,
+        canOpen,
+        isAdmin: role === 'manager',
+        isHR: !!role && role !== 'employee',
+        isEmployee: role === 'employee',
       }}
     >
       {children}

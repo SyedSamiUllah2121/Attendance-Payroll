@@ -8,7 +8,12 @@ import {
   formatService,
 } from '../../utils/annualLeaveEngine';
 
-export const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+export const fmt = (n: number) => String(Math.round(n * 100) / 100);
+
+const ordinal = (n: number) => {
+  const s = n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th';
+  return `${n}${s}`;
+};
 
 const statusStyles: Record<AccrualMonthStatus, { label: string; cls: string }> = {
   credited: {
@@ -63,6 +68,11 @@ export const MonthlyBreakdown: React.FC<{ summary: AnnualLeaveSummary }> = ({ su
             <tr key={m.month} className={bodyRow}>
               <td className="py-2 pr-3 font-medium">
                 {MONTH_NAMES[m.month]} {summary.year}
+                {m.joinedOnDay && (
+                  <span className="block text-[10px] font-normal text-neutral-400">
+                    joined on the {ordinal(m.joinedOnDay)} · prorated
+                  </span>
+                )}
               </td>
               <td className="py-2 pr-3">
                 <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${st.cls}`}>

@@ -1,8 +1,27 @@
 import React, { useState } from 'react';
-import { ShieldCheck, UserCheck, User, ArrowRight, Building2, Lock, Mail } from 'lucide-react';
-import { DEMO_ACCOUNTS, useAuth } from '../context/AuthContext';
+import {
+  ShieldCheck,
+  UserCheck,
+  User,
+  ArrowRight,
+  Building2,
+  Lock,
+  Mail,
+  Wallet,
+  ClipboardList,
+} from 'lucide-react';
+import { getDemoAccounts, useAuth } from '../context/AuthContext';
+import { ROLE_DESCRIPTIONS, ROLE_LABELS } from '../utils/permissions';
 import { useNotification } from '../context/NotificationContext';
 import { Role } from '../types';
+
+const ROLE_ICONS: Record<Role, React.ElementType> = {
+  manager: ShieldCheck,
+  attendance_manager: ClipboardList,
+  payroll_manager: Wallet,
+  assistant_manager: UserCheck,
+  employee: User,
+};
 
 export const LoginPage: React.FC = () => {
   const { login, quickLogin } = useAuth();
@@ -10,6 +29,7 @@ export const LoginPage: React.FC = () => {
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [demoAccounts] = useState(getDemoAccounts);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -17,17 +37,19 @@ export const LoginPage: React.FC = () => {
       error('Missing credentials', 'Please enter both email and password.');
       return;
     }
-    const ok = login(email, password);
-    if (!ok) {
-      error('Invalid credentials', 'Check your email and password, or use a Quick Login card.');
-    } else {
+    const result = login(email, password);
+    if (result.ok) {
       success('Welcome back', 'Signed in successfully.');
+    } else if (result.reason === 'disabled') {
+      error('Account disabled', 'This account has been disabled. Contact your manager.');
+    } else {
+      error('Invalid credentials', 'Check your email and password.');
     }
   };
 
-  const handleQuickLogin = (role: Role) => {
-    quickLogin(role);
-    success('Quick Login Activated', `Signed in as demo ${role}.`);
+  const handleQuickLogin = (accountId: string, role: Role) => {
+    quickLogin(accountId);
+    success('Quick Login Activated', `Signed in as demo ${ROLE_LABELS[role]}.`);
   };
 
   return (
@@ -51,68 +73,50 @@ export const LoginPage: React.FC = () => {
 
       <div className="relative z-10 mt-8 sm:mx-auto sm:w-full sm:max-w-xl px-4">
         {/* Quick Demo Login Cards */}
-        <div className="mb-6">
-          <div className="flex items-center justify-between mb-3 px-1">
-            <span className="text-xs font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-              Quick Demo Access
-            </span>
-            <span className="text-[11px] text-neutral-400 dark:text-neutral-500">
-              One-click instant sign-in
-            </span>
-          </div>
+        {demoAccounts.length > 0 && (
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-3 px-1">
+              <span className="text-xs font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                Quick Demo Access
+              </span>
+              <span className="text-[11px] text-neutral-400 dark:text-neutral-500">
+                One-click sign-in for each role
+              </span>
+            </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {DEMO_ACCOUNTS.map((acc) => {
-              const isAdm = acc.role === 'admin';
-              const isHr = acc.role === 'hr';
-
-              const roleIcon = isAdm ? (
-                <ShieldCheck className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-              ) : isHr ? (
-                <UserCheck className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-              ) : (
-                <User className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-              );
-
-              const roleLabel = isAdm
-                ? 'Administrator'
-                : isHr
-                ? 'HR Manager'
-                : 'Employee';
-
-              const roleDesc = isAdm
-                ? 'Full system access & settings'
-                : isHr
-                ? 'Manage employees, leaves, payroll'
-                : 'Self check-in, leaves & payslips';
-
-              return (
-                <button
-                  key={acc.role}
-                  type="button"
-                  onClick={() => handleQuickLogin(acc.role)}
-                  className="flex flex-col text-left p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 hover:border-indigo-500 dark:hover:border-indigo-500 hover:shadow-sm transition-all group cursor-pointer"
-                >
-                  <div className="flex items-center justify-between w-full mb-2.5">
-                    <div className="p-2 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 transition-colors">
-                      {roleIcon}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {demoAccounts.map((acc) => {
+                const Icon = ROLE_ICONS[acc.role];
+                return (
+                  <button
+                    key={acc.id}
+                    type="button"
+                    onClick={() => handleQuickLogin(acc.id, acc.role)}
+                    className={`flex items-center gap-3 text-left p-3 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 hover:border-indigo-500 dark:hover:border-indigo-500 hover:shadow-sm transition-all group cursor-pointer ${
+                      acc.role === 'manager' ? 'sm:col-span-2' : ''
+                    }`}
+                  >
+                    <div className="p-2 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 shrink-0">
+                      <Icon className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
                     </div>
-                    <ArrowRight className="w-4 h-4 text-neutral-300 dark:text-neutral-600 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors" />
-                  </div>
-                  <p className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                    {roleLabel}
-                  </p>
-                  <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate mt-0.5 font-mono">
-                    {acc.email}
-                  </p>
-                  <p className="text-[11px] text-neutral-400 dark:text-neutral-500 mt-2 leading-relaxed">
-                    {roleDesc}
-                  </p>
-                </button>
-              );
-            })}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
+                        {ROLE_LABELS[acc.role]}
+                      </p>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate font-mono">
+                        {acc.email}
+                      </p>
+                      <p className="text-[11px] text-neutral-400 dark:text-neutral-500 mt-0.5 leading-snug">
+                        {ROLE_DESCRIPTIONS[acc.role]}
+                      </p>
+                    </div>
+                    <ArrowRight className="w-4 h-4 text-neutral-300 dark:text-neutral-600 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors shrink-0" />
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Credentials Form */}
         <div className="bg-white dark:bg-neutral-900 py-6 px-6 sm:px-8 border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-xs">

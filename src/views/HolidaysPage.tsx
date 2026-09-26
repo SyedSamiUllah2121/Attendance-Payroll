@@ -7,7 +7,8 @@ import { useNotification } from '../context/NotificationContext';
 import { Modal } from '../components/common/Modal';
 
 export const HolidaysPage: React.FC = () => {
-  const { isHR } = useAuth();
+  const { can } = useAuth();
+  const canManage = can('holidays.manage');
   const { success, error } = useNotification();
 
   const [holidays, setHolidays] = useState<Holiday[]>(() => storageService.getHolidays());
@@ -64,7 +65,7 @@ export const HolidaysPage: React.FC = () => {
           </p>
         </div>
 
-        {isHR && (
+        {canManage && (
           <button
             onClick={() => setIsAddModalOpen(true)}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 self-start sm:self-auto transition-colors cursor-pointer"
@@ -105,7 +106,7 @@ export const HolidaysPage: React.FC = () => {
                 </div>
               </div>
 
-              {isHR && (
+              {canManage && (
                 <button
                   onClick={() => handleDeleteHoliday(h.id)}
                   className="p-1 text-neutral-400 hover:text-rose-600 transition-colors"

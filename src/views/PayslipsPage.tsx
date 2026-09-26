@@ -25,7 +25,8 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
   initialEmployeeId,
   initialMonth,
 }) => {
-  const { user, isHR, isEmployee } = useAuth();
+  const { user, isEmployee, can } = useAuth();
+  const canViewAll = can('payslips.view');
   const { formatMoney, settings } = useSettings();
 
   const [payrolls] = useState<PayrollRun[]>(() => storageService.getPayrolls());
@@ -74,7 +75,7 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
             </select>
           </div>
 
-          {isHR && (
+          {canViewAll && (
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-neutral-500">Employee:</span>
               <select

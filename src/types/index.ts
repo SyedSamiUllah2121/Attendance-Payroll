@@ -1,4 +1,9 @@
-export type Role = 'admin' | 'hr' | 'employee';
+export type Role =
+  | 'manager' // Head manager: full access, manages user accounts
+  | 'attendance_manager'
+  | 'payroll_manager'
+  | 'assistant_manager'
+  | 'employee';
 
 export interface User {
   id: string;
@@ -9,6 +14,15 @@ export interface User {
   avatar?: string;
   department?: string;
   designation?: string;
+}
+
+/** A login account stored in the system (managed from Users & Access). */
+export interface UserAccount extends User {
+  password: string;
+  status: 'Active' | 'Disabled';
+  createdAt: string;
+  createdBy?: string;
+  lastLoginAt?: string;
 }
 
 export type EmploymentType = 'Permanent' | 'Contract' | 'Intern';
@@ -97,6 +111,8 @@ export interface LeaveRequest {
   reviewedBy?: string;
   reviewedAt?: string;
   reviewComment?: string;
+  enteredBy?: string; // staff member who entered it on the employee's behalf
+  requestSource?: 'Self' | 'Message' | 'Phone' | 'Email' | 'In person';
 }
 
 export interface RegularizationRequest {
@@ -242,7 +258,6 @@ export interface PayrollSettings {
 export interface AnnualLeavePolicy {
   monthlyDays: number[]; // 12 entries, Jan..Dec: days credited for that month
   creditTiming: 'start' | 'end'; // credit when the month begins or once it is completed
-  joiningCutoffDay: number; // joined on/before this day-of-month -> that month counts
   maxCarryForward: number; // max unused days carried into next year (0 = reset yearly)
 }
 

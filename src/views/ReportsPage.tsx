@@ -12,11 +12,23 @@ import {
 import { Employee, AttendanceRecord, LeaveRequest, PayrollRun, Loan } from '../types';
 import { storageService } from '../services/storageService';
 import { useSettings } from '../context/SettingsContext';
+import { computeAnnualLeave, getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
 import { useNotification } from '../context/NotificationContext';
+import { useAuth } from '../context/AuthContext';
 
 export const ReportsPage: React.FC = () => {
   const { formatMoney, settings } = useSettings();
+  const leavePolicy = getAnnualLeavePolicy(settings);
+  const leaveYear = new Date().getFullYear();
+  // Annual leave is earned monthly, so each employee's quota is what they have earned this year.
+  const annualFor = (emp: Employee) => {
+    const s = computeAnnualLeave(emp, leaves, leavePolicy, leaveYear);
+    return { quota: s.carriedForward + s.accrued, used: s.used };
+  };
   const { success } = useNotification();
+  const { can } = useAuth();
+  // Salary-related reports are limited to roles with payroll access
+  const canSeePay = can('payroll.manage');
 
   const [selectedReport, setSelectedReport] = useState<
     'attendance' | 'payroll' | 'leaves' | 'taxes' | 'loans'
@@ -81,12 +93,14 @@ export const ReportsPage: React.FC = () => {
       {/* Report Selector Pills */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1">
         {[
-          { id: 'attendance', label: 'Attendance Summary' },
-          { id: 'payroll', label: 'Payroll Register' },
-          { id: 'leaves', label: 'Leave Balances' },
-          { id: 'taxes', label: 'Tax Withholding (FBR)' },
-          { id: 'loans', label: 'Loan Recoveries' },
-        ].map((r) => (
+          { id: 'attendance', label: 'Attendance Summary', pay: false },
+          { id: 'payroll', label: 'Payroll Register', pay: true },
+          { id: 'leaves', label: 'Leave Balances', pay: false },
+          { id: 'taxes', label: 'Tax Withholding (FBR)', pay: true },
+          { id: 'loans', label: 'Loan Recoveries', pay: true },
+        ]
+          .filter((r) => canSeePay || !r.pay)
+          .map((r) => (
           <button
             key={r.id}
             onClick={() => setSelectedReport(r.id as any)}
@@ -183,7 +197,7 @@ export const ReportsPage: React.FC = () => {
       )}
 
       {/* 2. Payroll Register */}
-      {selectedReport === 'payroll' && (
+      {selectedReport === 'payroll' && canSeePay && (
         <div className="bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
           <div className="px-6 py-4 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
             <div>
@@ -272,13 +286,12 @@ export const ReportsPage: React.FC = () => {
             </div>
             <button
               onClick={() => {
-                const annQuota = settings.leaves?.annual ?? settings.leaveQuotas?.Annual ?? 14;
                 const sickQuota = settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10;
                 const casQuota = settings.leaves?.casual ?? settings.leaveQuotas?.Casual ?? 8;
                 const headers = ['Employee ID', 'Name', 'Annual Used', 'Sick Used', 'Casual Used', 'Total Remaining'];
                 const rows = employees.map((emp) => {
                   const empLeaves = leaves.filter((l) => l.employeeId === emp.id && l.status === 'Approved');
-                  const ann = empLeaves.filter((l) => l.leaveType === 'Annual').reduce((a, b) => a + b.daysCount, 0);
+                  const { quota: annQuota, used: ann } = annualFor(emp);
                   const sick = empLeaves.filter((l) => l.leaveType === 'Sick').reduce((a, b) => a + b.daysCount, 0);
                   const cas = empLeaves.filter((l) => l.leaveType === 'Casual').reduce((a, b) => a + b.daysCount, 0);
                   const totalRem = annQuota + sickQuota + casQuota - (ann + sick + cas);
@@ -299,7 +312,7 @@ export const ReportsPage: React.FC = () => {
                   <th className="py-3 px-4">Employee</th>
                   <th className="py-3 px-4">Department</th>
                   <th className="py-3 px-3 text-center">
-                    Annual ({settings.leaves?.annual ?? settings.leaveQuotas?.Annual ?? 14}d)
+                    Annual (earned {leaveYear})
                   </th>
                   <th className="py-3 px-3 text-center">
                     Sick ({settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10}d)
@@ -314,11 +327,10 @@ export const ReportsPage: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
                 {employees.map((emp) => {
-                  const annQuota = settings.leaves?.annual ?? settings.leaveQuotas?.Annual ?? 14;
                   const sickQuota = settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10;
                   const casQuota = settings.leaves?.casual ?? settings.leaveQuotas?.Casual ?? 8;
                   const empLeaves = leaves.filter((l) => l.employeeId === emp.id && l.status === 'Approved');
-                  const ann = empLeaves.filter((l) => l.leaveType === 'Annual').reduce((a, b) => a + b.daysCount, 0);
+                  const { quota: annQuota, used: ann } = annualFor(emp);
                   const sick = empLeaves.filter((l) => l.leaveType === 'Sick').reduce((a, b) => a + b.daysCount, 0);
                   const cas = empLeaves.filter((l) => l.leaveType === 'Casual').reduce((a, b) => a + b.daysCount, 0);
                   const totalRem = annQuota + sickQuota + casQuota - (ann + sick + cas);
@@ -354,7 +366,7 @@ export const ReportsPage: React.FC = () => {
       )}
 
       {/* 4. Tax Withholding Schedule */}
-      {selectedReport === 'taxes' && (
+      {selectedReport === 'taxes' && canSeePay && (
         <div className="bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
           <div className="px-6 py-4 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
             <div>
@@ -428,7 +440,7 @@ export const ReportsPage: React.FC = () => {
       )}
 
       {/* 5. Loans Portfolio */}
-      {selectedReport === 'loans' && (
+      {selectedReport === 'loans' && canSeePay && (
         <div className="bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
           <div className="px-6 py-4 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
             <div>

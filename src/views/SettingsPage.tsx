@@ -43,7 +43,7 @@ export const SettingsPage: React.FC = () => {
       socialSecurityRate: settings.payroll.socialSecurityRate ?? 0.01,
     },
     leaveQuotas: {
-      Annual: settings.leaveQuotas?.Annual ?? 14,
+      Annual: settings.leaveQuotas?.Annual ?? 30,
       Sick: settings.leaveQuotas?.Sick ?? 10,
       Casual: settings.leaveQuotas?.Casual ?? 8,
       Unpaid: settings.leaveQuotas?.Unpaid ?? 30,
@@ -421,7 +421,7 @@ export const SettingsPage: React.FC = () => {
                   type="number"
                   min="0"
                   max="30"
-                  value={formData.leaveQuotas?.Annual ?? 14}
+                  value={formData.leaveQuotas?.Annual ?? 30}
                   onChange={(e) => {
                     const val = parseInt(e.target.value) || 0;
                     setFormData({

@@ -8,8 +8,10 @@ import {
   PayrollRun,
   RegularizationRequest,
   Shift,
+  UserAccount,
 } from '../types';
 import {
+  defaultUserAccounts,
   defaultEmployees,
   defaultHolidays,
   defaultLeaves,
@@ -31,8 +33,10 @@ const STORAGE_KEYS = {
   REGULARIZATIONS: 'workpulse_regularizations',
   LOANS: 'workpulse_loans',
   PAYROLLS: 'workpulse_payrolls',
+  USERS: 'workpulse_users',
   ACTIVE_USER: 'workpulse_active_user',
   SEEDED_VERSION: 'workpulse_seeded_v3',
+  LEAVE_POLICY_V2: 'workpulse_leave_policy_v2',
 };
 
 class StorageService {
@@ -47,6 +51,21 @@ class StorageService {
     if (!isSeeded) {
       this.resetDemoData();
     }
+    this.migrateAnnualLeavePolicy();
+  }
+
+  // One-time move from the old 3 days/month default to 2.5 days/month (30 days/year).
+  private migrateAnnualLeavePolicy(): void {
+    if (localStorage.getItem(STORAGE_KEYS.LEAVE_POLICY_V2)) return;
+    const settings = this.getSettings();
+    const days = settings.annualLeavePolicy?.monthlyDays;
+    if (days && days.length === 12 && days.every((d) => d === 3)) {
+      this.saveSettings({
+        ...settings,
+        annualLeavePolicy: { ...settings.annualLeavePolicy!, monthlyDays: Array(12).fill(2.5) },
+      });
+    }
+    localStorage.setItem(STORAGE_KEYS.LEAVE_POLICY_V2, '1');
   }
 
   public resetDemoData(): void {
@@ -215,6 +234,18 @@ class StorageService {
   public updateLoan(loan: Loan): void {
     const list = this.getLoans().map((l) => (l.id === loan.id ? loan : l));
     this.saveLoans(list);
+  }
+
+  // --- User accounts ---
+  public getUsers(): UserAccount[] {
+    const data = localStorage.getItem(STORAGE_KEYS.USERS);
+    if (data) return JSON.parse(data);
+    this.saveUsers(defaultUserAccounts);
+    return [...defaultUserAccounts];
+  }
+
+  public saveUsers(users: UserAccount[]): void {
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
   }
 
   // --- Payrolls ---

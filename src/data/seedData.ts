@@ -9,6 +9,7 @@ import {
   PayrollRun,
   RegularizationRequest,
   Shift,
+  UserAccount,
 } from '../types';
 import { calculateSalary } from '../utils/payrollEngine';
 import { evaluateAttendanceStatus, getWorkingDaysInMonth } from '../utils/attendanceEngine';
@@ -53,18 +54,83 @@ export const defaultSettings: AppSettings = {
     ],
   },
   leaveQuotas: {
-    Annual: 14,
+    Annual: 30,
     Sick: 10,
     Casual: 8,
     Unpaid: 999,
   },
   annualLeavePolicy: {
-    monthlyDays: [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
+    monthlyDays: [2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5], // 30 days/year
     creditTiming: 'end',
-    joiningCutoffDay: 15,
     maxCarryForward: 0,
   },
 };
+
+/**
+ * Login accounts created on first run. The Head Manager can add, edit or remove
+ * accounts afterwards from Users & Access.
+ */
+export const defaultUserAccounts: UserAccount[] = [
+  {
+    id: 'user-manager',
+    role: 'manager',
+    email: 'admin@workpulse.com',
+    password: 'admin123',
+    name: 'Mustafa Zaidi',
+    designation: 'Managing Director / Head Manager',
+    department: 'Executive',
+    status: 'Active',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'user-attendance',
+    role: 'attendance_manager',
+    email: 'attendance@workpulse.com',
+    password: 'attend123',
+    name: 'Fatima Noor',
+    designation: 'Attendance Manager',
+    department: 'Operations',
+    employeeId: 'EMP-006',
+    status: 'Active',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'user-payroll',
+    role: 'payroll_manager',
+    email: 'payroll@workpulse.com',
+    password: 'payroll123',
+    name: 'Usman Tariq',
+    designation: 'Payroll Manager',
+    department: 'Finance',
+    employeeId: 'EMP-003',
+    status: 'Active',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'user-assistant',
+    role: 'assistant_manager',
+    email: 'hr@workpulse.com',
+    password: 'hr123',
+    name: 'Sara Ahmed',
+    designation: 'Assistant Manager',
+    department: 'Human Resources',
+    employeeId: 'EMP-002',
+    status: 'Active',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'user-employee',
+    role: 'employee',
+    email: 'ali.khan@workpulse.com',
+    password: 'emp123',
+    name: 'Ali Khan',
+    designation: 'Senior Developer',
+    department: 'Engineering',
+    employeeId: 'EMP-001',
+    status: 'Active',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+];
 
 export const defaultShifts: Shift[] = [
   {

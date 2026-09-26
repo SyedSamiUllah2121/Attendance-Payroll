@@ -6,9 +6,8 @@ export const MONTH_NAMES = [
 ];
 
 export const DEFAULT_ANNUAL_LEAVE_POLICY: AnnualLeavePolicy = {
-  monthlyDays: [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
+  monthlyDays: [2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5], // 30 days/year
   creditTiming: 'end',
-  joiningCutoffDay: 15,
   maxCarryForward: 0,
 };
 
@@ -16,11 +15,10 @@ export const DEFAULT_ANNUAL_LEAVE_POLICY: AnnualLeavePolicy = {
 export const getAnnualLeavePolicy = (settings: AppSettings): AnnualLeavePolicy => {
   const p = settings.annualLeavePolicy;
   if (!p) return DEFAULT_ANNUAL_LEAVE_POLICY;
-  const monthlyDays = Array.from({ length: 12 }, (_, i) => Number(p.monthlyDays?.[i] ?? 3) || 0);
+  const monthlyDays = Array.from({ length: 12 }, (_, i) => Number(p.monthlyDays?.[i] ?? 2.5) || 0);
   return {
     monthlyDays,
     creditTiming: p.creditTiming === 'start' ? 'start' : 'end',
-    joiningCutoffDay: p.joiningCutoffDay ?? DEFAULT_ANNUAL_LEAVE_POLICY.joiningCutoffDay,
     maxCarryForward: p.maxCarryForward ?? DEFAULT_ANNUAL_LEAVE_POLICY.maxCarryForward,
   };
 };
@@ -32,6 +30,7 @@ export interface AccrualMonth {
   status: AccrualMonthStatus;
   earned: number; // credited so far this month
   entitlement: number; // what this month is worth once credited (0 if not joined)
+  joinedOnDay?: number; // set on the joining month when it is prorated (joined after the 1st)
   used: number;
   pending: number;
   runningBalance: number;
@@ -55,11 +54,18 @@ const monthIndex = (year: number, month: number) => year * 12 + month;
 
 const round = (n: number) => Math.round(n * 100) / 100;
 
-/** First absolute month in which the employee starts earning, based on joining date and cutoff day. */
-const firstEarningMonth = (employee: Employee, policy: AnnualLeavePolicy): number => {
-  const [y, m, d] = employee.joiningDate.split('-').map(Number);
-  const base = monthIndex(y, m - 1);
-  return d <= policy.joiningCutoffDay ? base : base + 1;
+/**
+ * Leave a month is worth for this employee. Leave starts on the joining date, so the joining
+ * month is prorated by the days remaining in it (joined on the 20th of a 30-day month = 11/30).
+ */
+const monthValue = (employee: Employee, year: number, month: number, days: number): number => {
+  const [jy, jm, jd] = employee.joiningDate.split('-').map(Number);
+  const abs = monthIndex(year, month);
+  const joinAbs = monthIndex(jy, jm - 1);
+  if (abs < joinAbs) return 0;
+  if (abs > joinAbs || jd <= 1) return days;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  return round((days * (daysInMonth - jd + 1)) / daysInMonth);
 };
 
 const isCredited = (abs: number, todayAbs: number, policy: AnnualLeavePolicy) =>
@@ -79,15 +85,18 @@ const sumLeaves = (leaves: LeaveRequest[], year: number, month?: number) =>
     .reduce((acc, l) => acc + (l.daysCount || 0), 0);
 
 const accruedInYear = (
+  employee: Employee,
   year: number,
-  startAbs: number,
   todayAbs: number,
   policy: AnnualLeavePolicy
 ) =>
-  policy.monthlyDays.reduce((acc, days, m) => {
-    const abs = monthIndex(year, m);
-    return abs >= startAbs && isCredited(abs, todayAbs, policy) ? acc + days : acc;
-  }, 0);
+  policy.monthlyDays.reduce(
+    (acc, days, m) =>
+      isCredited(monthIndex(year, m), todayAbs, policy)
+        ? acc + monthValue(employee, year, m, days)
+        : acc,
+    0
+  );
 
 export const computeAnnualLeave = (
   employee: Employee,
@@ -97,7 +106,8 @@ export const computeAnnualLeave = (
   today: Date = new Date()
 ): AnnualLeaveSummary => {
   const todayAbs = monthIndex(today.getFullYear(), today.getMonth());
-  const startAbs = firstEarningMonth(employee, policy);
+  const [jy, jm, jd] = employee.joiningDate.split('-').map(Number);
+  const joinAbs = monthIndex(jy, jm - 1);
   const joinYear = Number(employee.joiningDate.slice(0, 4));
 
   const annual = allLeaves.filter(
@@ -110,40 +120,41 @@ export const computeAnnualLeave = (
   let carriedForward = 0;
   for (let y = joinYear; y < year; y++) {
     const closing =
-      carriedForward + accruedInYear(y, startAbs, todayAbs, policy) - sumLeaves(approved, y);
+      carriedForward + accruedInYear(employee, y, todayAbs, policy) - sumLeaves(approved, y);
     carriedForward = Math.min(closing, policy.maxCarryForward);
   }
 
   let running = carriedForward;
   const months: AccrualMonth[] = policy.monthlyDays.map((days, m) => {
     const abs = monthIndex(year, m);
-    const joined = abs >= startAbs;
+    const joined = abs >= joinAbs;
+    const value = monthValue(employee, year, m, days);
     let status: AccrualMonthStatus;
     if (!joined) status = 'not-joined';
     else if (isCredited(abs, todayAbs, policy)) status = 'credited';
     else if (abs === todayAbs) status = 'accruing';
     else status = 'upcoming';
 
-    const earned = status === 'credited' ? days : 0;
+    const earned = status === 'credited' ? value : 0;
     const used = sumLeaves(approved, year, m);
     running += earned - used;
     return {
       month: m,
       status,
       earned,
-      entitlement: joined ? days : 0,
+      entitlement: value,
+      joinedOnDay: abs === joinAbs && jd > 1 ? jd : undefined,
       used,
       pending: sumLeaves(pendingLeaves, year, m),
       runningBalance: round(running),
     };
   });
 
-  const accrued = months.reduce((a, m) => a + m.earned, 0);
+  const accrued = round(months.reduce((a, m) => a + m.earned, 0));
   const used = sumLeaves(approved, year);
   const pending = sumLeaves(pendingLeaves, year);
   const balance = carriedForward + accrued - used;
 
-  const [jy, jm, jd] = employee.joiningDate.split('-').map(Number);
   let serviceMonths = (today.getFullYear() - jy) * 12 + (today.getMonth() - (jm - 1));
   if (today.getDate() < jd) serviceMonths -= 1;
 

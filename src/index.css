@@ -2,6 +2,82 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/*
+ * Motion system. Short, eased, enter-only animations:
+ *   animate-fade-up   content appearing (pages, sections, rows)
+ *   animate-fade-in   backdrops
+ *   animate-scale-in  dialogs
+ *   animate-pop       dropdowns / popovers (set the transform origin with origin-*)
+ *   animate-toast     notifications sliding in from the right
+ * All of it is switched off for users who ask for reduced motion (see the end of this file).
+ */
+@theme {
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --animate-fade-up: wp-fade-up 0.45s var(--ease-out-soft) both;
+  --animate-fade-in: wp-fade-in 0.2s ease-out both;
+  --animate-scale-in: wp-scale-in 0.28s var(--ease-out-soft) both;
+  --animate-pop: wp-pop 0.18s var(--ease-out-soft) both;
+  --animate-toast: wp-toast 0.35s var(--ease-out-soft) both;
+
+  @keyframes wp-fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes wp-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes wp-scale-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes wp-pop {
+    from {
+      opacity: 0;
+      transform: translateY(-4px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes wp-toast {
+    from {
+      opacity: 0;
+      transform: translateX(24px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes wp-bar-grow {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: none;
+    }
+  }
+}
+
 @layer base {
   :root {
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -9,6 +85,176 @@
   
   .font-mono {
     font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+}
+
+/*
+ * Light mode: the lightest gray borders (neutral-100 / neutral-200) almost vanish on white,
+ * so draw them one shade darker. Wrapped in :where() to keep the same specificity as the
+ * utilities they replace, so hover:/focus: border colors and dark mode still take priority.
+ */
+@layer utilities {
+  :where(html:not(.dark)) .border-neutral-100 {
+    border-color: var(--color-neutral-200);
+  }
+  :where(html:not(.dark)) .border-neutral-200 {
+    border-color: var(--color-neutral-300);
+  }
+  :where(html:not(.dark) .divide-neutral-100 > :not(:last-child)) {
+    border-color: var(--color-neutral-200);
+  }
+}
+
+/*
+ * Light mode "raised surfaces": white cards float on a cool gray page with soft layered
+ * shadows instead of gray outlines. Only a near-invisible hairline is kept for a crisp edge.
+ *
+ * Every selector keeps the specificity of a single utility class (qualifiers sit inside
+ * :where), so hover:/focus:/selected borders, rings, larger shadows and dark mode still win.
+ */
+:root {
+  --wp-page-bg: #eef1f6;
+  --wp-hairline: rgb(15 23 42 / 0.08);
+  --wp-surface-shadow: 0 1px 3px rgb(16 24 40 / 0.1), 0 4px 12px -2px rgb(16 24 40 / 0.12),
+    0 14px 32px -10px rgb(16 24 40 / 0.18);
+  /* Inputs, dropdowns and white buttons */
+  --wp-field-border: rgb(15 23 42 / 0.12);
+  --wp-field-shadow: 0 1px 2px rgb(16 24 40 / 0.1), 0 2px 6px -2px rgb(16 24 40 / 0.08);
+  /* Boxes nested inside a card (inner tables, info tiles) */
+  --wp-inner-shadow: 0 1px 3px rgb(16 24 40 / 0.1), 0 4px 10px -4px rgb(16 24 40 / 0.12);
+}
+
+@layer utilities {
+  /* Page background a touch darker than the cards so they read as raised */
+  :where(html:not(.dark)) .min-h-screen.bg-neutral-50 {
+    background-color: var(--wp-page-bg);
+  }
+
+  /* Cards & sections: white, rounded, bordered → hairline edge + soft shadow */
+  :where(html:not(.dark) :is(.bg-white, .bg-white\/95):is(.rounded-xl, .rounded-2xl)).border-neutral-200 {
+    border-color: var(--wp-hairline);
+  }
+  :where(
+      html:not(.dark)
+        :is(.bg-white, .bg-white\/95):is(.rounded-xl, .rounded-2xl):not(
+          .shadow-md,
+          .shadow-lg,
+          .shadow-xl,
+          .ring-1,
+          .ring-2
+        )
+    ).border {
+    box-shadow: var(--wp-surface-shadow);
+  }
+
+  /* Inputs, selects, textareas, time pickers and white/gray toolbar buttons: raised fields */
+  :where(
+      html:not(.dark)
+        :is(
+          input,
+          select,
+          textarea,
+          .bg-neutral-50:is(.rounded-lg, .rounded-md),
+          .bg-white:is(.rounded-lg, .rounded-md, .rounded-full),
+          .bg-neutral-100.rounded-lg
+        )
+    ):is(.border-neutral-200, .border-neutral-300) {
+    border-color: var(--wp-field-border);
+    box-shadow: var(--wp-field-shadow);
+  }
+  /* Fields sit on white cards, so make their fill white too */
+  :where(html:not(.dark) :is(input, select, textarea, .bg-neutral-50:is(.rounded-lg, .rounded-md))).border-neutral-200 {
+    background-color: #fff;
+  }
+
+  /* Boxes nested inside cards: inner tables, info tiles, sub-panels */
+  :where(
+      html:not(.dark)
+        :is(.rounded-xl, .rounded-2xl):not(.bg-white, .bg-white\/95, .border-dashed, .shadow-md, .shadow-lg, .shadow-xl)
+    ):is(.border-neutral-100, .border-neutral-200) {
+    border-color: var(--wp-hairline);
+    box-shadow: var(--wp-inner-shadow);
+  }
+
+  /* Sidebar and top bar: soft shadow edge instead of a gray line */
+  :where(html:not(.dark) aside).border-neutral-200 {
+    border-color: transparent;
+    box-shadow: 1px 0 0 var(--wp-hairline), 8px 0 28px -10px rgb(16 24 40 / 0.22);
+  }
+  :where(html:not(.dark) header).border-neutral-200 {
+    border-color: var(--wp-hairline);
+    box-shadow: 0 1px 3px rgb(16 24 40 / 0.08), 0 8px 20px -10px rgb(16 24 40 / 0.2);
+  }
+}
+
+/* Light mode: chart grid lines are drawn at 15% opacity, which is invisible on white */
+:where(html:not(.dark)) .recharts-cartesian-grid line {
+  opacity: 0.55;
+}
+
+/*
+ * Page entrance: when a page opens (App keys .wp-page by page id), its top-level sections
+ * cascade in one after another, and cards inside top-level grids stagger in.
+ * Fixed-position children (dialogs) are skipped so they never wait on a delay.
+ */
+.wp-page > * > :not(.fixed) {
+  animation: var(--animate-fade-up);
+}
+.wp-page > * > :nth-child(2) { animation-delay: 50ms; }
+.wp-page > * > :nth-child(3) { animation-delay: 100ms; }
+.wp-page > * > :nth-child(4) { animation-delay: 150ms; }
+.wp-page > * > :nth-child(5) { animation-delay: 200ms; }
+.wp-page > * > :nth-child(n + 6) { animation-delay: 250ms; }
+
+.wp-page > * > .grid > * {
+  animation: var(--animate-fade-up);
+}
+.wp-page > * > .grid > :nth-child(2) { animation-delay: 90ms; }
+.wp-page > * > .grid > :nth-child(3) { animation-delay: 130ms; }
+.wp-page > * > .grid > :nth-child(4) { animation-delay: 170ms; }
+.wp-page > * > .grid > :nth-child(5) { animation-delay: 210ms; }
+.wp-page > * > .grid > :nth-child(6) { animation-delay: 250ms; }
+.wp-page > * > .grid > :nth-child(n + 7) { animation-delay: 290ms; }
+
+/* Table rows ease in when they appear (page load, filtering, paging) */
+.wp-page tbody > tr {
+  animation: wp-fade-in 0.3s ease-out both;
+}
+
+/* Progress / balance bars grow from the left when they first render */
+.wp-page .overflow-hidden > .h-full.rounded-full[style*='width'] {
+  transform-origin: left center;
+  animation: wp-bar-grow 0.8s var(--ease-out-soft) both;
+  animation-delay: 150ms;
+}
+
+@layer base {
+  /* Clear focus ring for keyboard users (mouse clicks don't trigger :focus-visible) */
+  :focus-visible {
+    outline: 2px solid #6366f1;
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* Tactile press feedback on every button (uses `scale`, so it combines with any translate) */
+  button:not(:disabled):active {
+    scale: 0.97;
+  }
+}
+
+/* Respect the operating system's "reduce motion" setting */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  button:not(:disabled):active {
+    scale: none;
   }
 }
 

@@ -28,6 +28,7 @@ import {
   getAnnualLeavePolicy,
 } from '../utils/annualLeaveEngine';
 import { LeaveRecordView, fmt } from '../components/leave/LeaveRecordView';
+import { AnimatedNumber } from '../components/common/AnimatedNumber';
 
 const inputClass =
   'w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100';
@@ -47,7 +48,9 @@ const StatCard: React.FC<{
       <span className="text-xs text-neutral-400 font-medium">{label}</span>
       <Icon className={`w-4 h-4 ${accent}`} />
     </div>
-    <div className={`text-2xl font-bold font-mono mt-1 ${accent}`}>{value}</div>
+    <div className={`text-2xl font-bold font-mono mt-1 ${accent}`}>
+      {/^-?d+(.d+)?$/.test(value) ? <AnimatedNumber value={Number(value)} /> : value}
+    </div>
     <p className="text-[11px] text-neutral-400 mt-1">{hint}</p>
   </div>
 );
@@ -59,7 +62,7 @@ const PolicyEditor: React.FC<{
 }> = ({ policy, canEdit, onSave }) => {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<AnnualLeavePolicy>(policy);
-  const [bulk, setBulk] = useState('3');
+  const [bulk, setBulk] = useState('2.5');
 
   const total = draft.monthlyDays.reduce((a, d) => a + (Number(d) || 0), 0);
   const savedTotal = policy.monthlyDays.reduce((a, d) => a + d, 0);
@@ -147,12 +150,16 @@ const PolicyEditor: React.FC<{
                 </div>
               ))}
             </div>
-            <p className="text-xs text-neutral-500 mt-2">
+            <p className="text-[11px] text-neutral-400 mt-2">
+              Leave starts on the joining date: the joining month is prorated by the days left in it
+              (e.g. joined on the 20th of a 30-day month = 11/30 of that month&apos;s days).
+            </p>
+            <p className="text-xs text-neutral-500 mt-1">
               Yearly total: <span className="font-bold font-mono">{fmt(total)}</span> days
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
                 When is a month credited?
@@ -168,25 +175,6 @@ const PolicyEditor: React.FC<{
                 <option value="end">After the month is completed</option>
                 <option value="start">At the start of the month</option>
               </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
-                Joining month counts if joined by day
-              </label>
-              <input
-                type="number"
-                min={1}
-                max={31}
-                disabled={!canEdit}
-                value={draft.joiningCutoffDay}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    joiningCutoffDay: Math.min(31, Math.max(1, Number(e.target.value) || 1)),
-                  })
-                }
-                className={`${inputClass} font-mono disabled:opacity-70`}
-              />
             </div>
             <div>
               <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
@@ -231,7 +219,7 @@ const PolicyEditor: React.FC<{
 };
 
 export const AnnualLeavePage: React.FC = () => {
-  const { user, isHR, isAdmin } = useAuth();
+  const { user, can } = useAuth();
   const { settings, updateSettings } = useSettings();
   const { success } = useNotification();
 
@@ -300,7 +288,7 @@ export const AnnualLeavePage: React.FC = () => {
   );
 
   // Employee view: only their own balance.
-  if (!isHR) {
+  if (!can('annualLeave.view')) {
     const me = employees.find((e) => e.id === user?.employeeId);
     const s = me ? summaries.get(me.id) : undefined;
     const rec = me ? records.get(me.id) : undefined;
@@ -392,7 +380,7 @@ export const AnnualLeavePage: React.FC = () => {
       <PolicyEditor
         key={JSON.stringify(policy)}
         policy={policy}
-        canEdit={isAdmin}
+        canEdit={can('annualLeave.policy')}
         onSave={handleSavePolicy}
       />
 

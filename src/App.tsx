@@ -17,9 +17,10 @@ import { ShiftsPage } from './views/ShiftsPage';
 import { HolidaysPage } from './views/HolidaysPage';
 import { ReportsPage } from './views/ReportsPage';
 import { SettingsPage } from './views/SettingsPage';
+import { UsersPage } from './views/UsersPage';
 
 const AppContent: React.FC = () => {
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, canOpen } = useAuth();
   const [currentPage, setCurrentPage] = useState<string>('dashboard');
 
   // Parameters for Payslip drill-down
@@ -30,6 +31,9 @@ const AppContent: React.FC = () => {
     return <LoginPage />;
   }
 
+  // Fall back to the dashboard if this account may not open the selected page
+  const page = canOpen(currentPage) ? currentPage : 'dashboard';
+
   const handleOpenPayslip = (employeeId: string, month?: string) => {
     setPayslipEmployeeId(employeeId);
     setPayslipMonth(month);
@@ -37,27 +41,31 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <AppLayout currentPage={currentPage} onNavigate={setCurrentPage}>
-      {currentPage === 'dashboard' && (
-        <DashboardPage onNavigate={setCurrentPage} onOpenPayslip={handleOpenPayslip} />
-      )}
-      {currentPage === 'employees' && <EmployeesPage />}
-      {currentPage === 'attendance' && <AttendancePage />}
-      {currentPage === 'leaves' && <LeavesPage />}
-      {currentPage === 'annual-leave' && <AnnualLeavePage />}
-      {currentPage === 'payroll' && <PayrollPage onOpenPayslip={handleOpenPayslip} />}
-      {currentPage === 'payslips' && (
-        <PayslipsPage
-          initialEmployeeId={payslipEmployeeId}
-          initialMonth={payslipMonth}
-        />
-      )}
-      {currentPage === 'loans' && <LoansPage />}
-      {currentPage === 'analytics' && <AnalyticsPage />}
-      {currentPage === 'shifts' && <ShiftsPage />}
-      {currentPage === 'holidays' && <HolidaysPage />}
-      {currentPage === 'reports' && <ReportsPage />}
-      {currentPage === 'settings' && <SettingsPage />}
+    <AppLayout currentPage={page} onNavigate={setCurrentPage}>
+      {/* Keyed by page so the entrance animation replays on every page change */}
+      <div key={page} className="wp-page">
+        {page === 'dashboard' && (
+          <DashboardPage onNavigate={setCurrentPage} onOpenPayslip={handleOpenPayslip} />
+        )}
+        {page === 'employees' && <EmployeesPage />}
+        {page === 'attendance' && <AttendancePage />}
+        {page === 'leaves' && <LeavesPage />}
+        {page === 'annual-leave' && <AnnualLeavePage />}
+        {page === 'payroll' && <PayrollPage onOpenPayslip={handleOpenPayslip} />}
+        {page === 'payslips' && (
+          <PayslipsPage
+            initialEmployeeId={payslipEmployeeId}
+            initialMonth={payslipMonth}
+          />
+        )}
+        {page === 'loans' && <LoansPage />}
+        {page === 'analytics' && <AnalyticsPage />}
+        {page === 'shifts' && <ShiftsPage />}
+        {page === 'holidays' && <HolidaysPage />}
+        {page === 'reports' && <ReportsPage />}
+        {page === 'users' && <UsersPage />}
+        {page === 'settings' && <SettingsPage />}
+      </div>
     </AppLayout>
   );
 };

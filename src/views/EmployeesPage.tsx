@@ -23,6 +23,7 @@ import { Employee, EmploymentType, Gender, EmployeeStatus, Shift } from '../type
 import { storageService } from '../services/storageService';
 import { useSettings } from '../context/SettingsContext';
 import { useNotification } from '../context/NotificationContext';
+import { useAuth } from '../context/AuthContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
@@ -39,6 +40,8 @@ interface EmployeesPageProps {
 
 export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) => {
   const { formatMoney, settings } = useSettings();
+  const { can } = useAuth();
+  const canEdit = can('employees.edit');
   const { success, error, info } = useNotification();
 
   const [employees, setEmployees] = useState<Employee[]>(() => storageService.getEmployees());
@@ -240,12 +243,14 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             Manage profiles, employment types, shifts, and compensation structures
           </p>
         </div>
-        <button
-          onClick={handleOpenAdd}
-          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 self-start sm:self-auto transition-colors cursor-pointer"
-        >
-          <Plus className="w-4 h-4" /> Add Employee
-        </button>
+        {canEdit && (
+          <button
+            onClick={handleOpenAdd}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 self-start sm:self-auto transition-colors cursor-pointer"
+          >
+            <Plus className="w-4 h-4" /> Add Employee
+          </button>
+        )}
       </div>
 
       {/* Filter & Search Bar */}
@@ -448,6 +453,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                           >
                             <Eye className="w-4 h-4" />
                           </button>
+                          {canEdit && (<>
                           <button
                             onClick={() => handleOpenEdit(emp)}
                             className="p-1.5 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-100 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
@@ -466,6 +472,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                               <CheckCircle className="w-4 h-4" />
                             )}
                           </button>
+                          </>)}
                         </div>
                       </td>
                     </tr>

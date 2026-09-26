@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Calendar,
   Clock,
@@ -25,17 +25,52 @@ import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { evaluateAttendanceStatus } from '../utils/attendanceEngine';
 import { MarkAttendanceSheet } from '../components/attendance/MarkAttendanceSheet';
+import { reviewRegularization } from '../services/approvalService';
 
 export const AttendancePage: React.FC = () => {
-  const { user, isHR, isEmployee } = useAuth();
+  const { user, isEmployee, can } = useAuth();
+  const canView = can('attendance.view');
+  const canMark = can('attendance.mark');
+  const canApprove = can('attendance.approve');
   const { settings } = useSettings();
   const { success, warning, error } = useNotification();
 
   // Mode: Daily view, Monthly Matrix grid, or Regularization Requests
-  const [viewMode, setViewMode] = useState<'mark' | 'daily' | 'monthly' | 'regularizations'>('daily');
+  const [viewMode, setViewMode] = useState<'mark' | 'daily' | 'monthly' | 'regularizations'>(
+    () => {
+      // Another screen (e.g. the notification bell) can ask to open a specific tab once.
+      try {
+        const requested = sessionStorage.getItem('workpulse_attendance_view');
+        if (requested === 'regularizations' || requested === 'mark' || requested === 'monthly') {
+          sessionStorage.removeItem('workpulse_attendance_view');
+          return requested;
+        }
+      } catch {
+        // storage unavailable: fall back to the default tab
+      }
+      return 'daily';
+    }
+  );
   const [selectedDate, setSelectedDate] = useState('2026-09-23');
   const [selectedMonth, setSelectedMonth] = useState('2026-09');
   const [departmentFilter, setDepartmentFilter] = useState('');
+
+  // Switch tabs when asked while this page is already open (e.g. from the notification bell)
+  useEffect(() => {
+    const onRequest = (e: Event) => {
+      const view = (e as CustomEvent<string>).detail;
+      if (view === 'regularizations' || view === 'mark' || view === 'monthly' || view === 'daily') {
+        setViewMode(view);
+        try {
+          sessionStorage.removeItem('workpulse_attendance_view');
+        } catch {
+          // ignore
+        }
+      }
+    };
+    window.addEventListener('workpulse:attendance-view', onRequest);
+    return () => window.removeEventListener('workpulse:attendance-view', onRequest);
+  }, []);
 
   // Storage data
   const [employees, setEmployees] = useState<Employee[]>(() => storageService.getEmployees());
@@ -186,41 +221,7 @@ export const AttendancePage: React.FC = () => {
     req: RegularizationRequest,
     action: 'Approved' | 'Rejected'
   ) => {
-    const updated: RegularizationRequest = {
-      ...req,
-      status: action,
-      reviewedBy: user?.name || 'Administrator',
-      reviewedAt: new Date().toISOString(),
-      reviewComment: action === 'Approved' ? 'Verified with attendance log' : 'Insufficient justification',
-    };
-
-    storageService.updateRegularization(updated);
-
-    if (action === 'Approved') {
-      const existing = attendance.find(
-        (r) => r.employeeId === req.employeeId && r.date === req.date
-      );
-      const emp = employees.find((e) => e.id === req.employeeId);
-      const shift = shifts.find((s) => s.id === emp?.shiftId) || shifts[0];
-      const evalResult = evaluateAttendanceStatus(
-        req.requestedCheckIn,
-        req.requestedCheckOut,
-        shift,
-        req.date
-      );
-
-      storageService.saveOrUpdateAttendanceRecord({
-        id: existing?.id || `att-${req.employeeId}-${req.date}`,
-        employeeId: req.employeeId,
-        date: req.date,
-        checkIn: req.requestedCheckIn,
-        checkOut: req.requestedCheckOut,
-        status: evalResult.status,
-        workedMinutes: evalResult.workedMinutes,
-        overtimeMinutes: evalResult.overtimeMinutes,
-        notes: `Regularized by ${user?.name || 'HR'}`,
-      });
-    }
+    reviewRegularization(req, action, user?.name || 'Manager');
 
     success(
       `Request ${action}`,
@@ -286,7 +287,7 @@ export const AttendancePage: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           {/* View switcher pills */}
           <div className="flex items-center bg-neutral-100 dark:bg-neutral-800 p-1 rounded-lg">
-            {isHR && (
+            {canMark && (
               <button
                 onClick={() => setViewMode('mark')}
                 className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors ${
@@ -343,14 +344,14 @@ export const AttendancePage: React.FC = () => {
             </button>
           )}
 
-          {isHR && (
+          {canView && (
             <>
-              <button
+              {canMark && (<button
                 onClick={() => setIsBulkModalOpen(true)}
                 className="px-3.5 py-1.5 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-200 rounded-lg text-xs font-semibold hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors cursor-pointer"
               >
                 Mark Bulk
-              </button>
+              </button>)}
               <button
                 onClick={handleExportCSV}
                 className="px-3.5 py-1.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-100 dark:hover:bg-white text-white dark:text-neutral-900 rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
@@ -362,7 +363,7 @@ export const AttendancePage: React.FC = () => {
         </div>
       </div>
 
-      {viewMode === 'mark' && isHR && (
+      {viewMode === 'mark' && canMark && (
         <MarkAttendanceSheet
           employees={employees}
           shifts={shifts}
@@ -398,7 +399,7 @@ export const AttendancePage: React.FC = () => {
             </div>
           )}
 
-          {isHR && (
+          {canView && (
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-neutral-500">Department:</span>
               <select
@@ -454,7 +455,7 @@ export const AttendancePage: React.FC = () => {
                   <th className="py-3 px-4">Worked Hours</th>
                   <th className="py-3 px-4">Overtime</th>
                   <th className="py-3 px-4">Status</th>
-                  {isHR && <th className="py-3 px-4 text-right">Action</th>}
+                  {canMark && <th className="py-3 px-4 text-right">Action</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
@@ -503,7 +504,7 @@ export const AttendancePage: React.FC = () => {
                       <td className="py-3.5 px-4">
                         <Badge status={rec?.status || 'Absent'} />
                       </td>
-                      {isHR && (
+                      {canMark && (
                         <td className="py-3.5 px-4 text-right">
                           <button
                             onClick={() =>
@@ -642,7 +643,7 @@ export const AttendancePage: React.FC = () => {
                           <td
                             key={dStr}
                             onClick={() => {
-                              if (isHR) {
+                              if (canMark) {
                                 setEditingRecord({
                                   employeeId: emp.id,
                                   employeeName: emp.name,
@@ -728,7 +729,7 @@ export const AttendancePage: React.FC = () => {
                   <th className="py-3 px-4">Reason / Notes</th>
                   <th className="py-3 px-4">Submitted At</th>
                   <th className="py-3 px-4">Status</th>
-                  {isHR && <th className="py-3 px-4 text-right">Actions</th>}
+                  {canApprove && <th className="py-3 px-4 text-right">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
@@ -772,7 +773,7 @@ export const AttendancePage: React.FC = () => {
                         <td className="py-3.5 px-4">
                           <Badge status={reg.status} />
                         </td>
-                        {isHR && (
+                        {canApprove && (
                           <td className="py-3.5 px-4 text-right">
                             {reg.status === 'Pending' ? (
                               <div className="flex items-center justify-end gap-1.5">

@@ -38,7 +38,9 @@ import {
   ZAxis,
 } from 'recharts';
 import { useAuth } from '../context/AuthContext';
+import { axisProps, barAnimation, barCursor, chartAnimation, lineCursor, tooltipStyle } from '../utils/chartTheme';
 import { useSettings } from '../context/SettingsContext';
+import { getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
 import { useNotification } from '../context/NotificationContext';
 import { storageService } from '../services/storageService';
 import {
@@ -66,7 +68,8 @@ import {
 import { Badge } from '../components/common/Badge';
 
 export const AnalyticsPage: React.FC = () => {
-  const { user, isEmployee } = useAuth();
+  const { user, can } = useAuth();
+  const isEmployee = !can('analytics.view');
   const { formatMoney, settings } = useSettings();
   const { success, warning, error, info } = useNotification();
 
@@ -147,7 +150,7 @@ export const AnalyticsPage: React.FC = () => {
 
   // Calculations
   const totalLeaveQuotas =
-    (settings.leaves?.annual ?? settings.leaveQuotas?.Annual ?? 14) +
+    getAnnualLeavePolicy(settings).monthlyDays.reduce((a, d) => a + d, 0) +
     (settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10) +
     (settings.leaves?.casual ?? settings.leaveQuotas?.Casual ?? 8);
 
@@ -610,21 +613,12 @@ export const AnalyticsPage: React.FC = () => {
               <div className="h-64 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={deptComparisonData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
-                    <XAxis dataKey="department" tick={{ fontSize: 11 }} />
-                    <YAxis tick={{ fontSize: 11 }} domain={[70, 100]} />
-                    <Tooltip
-                      formatter={(v: any) => `${v}%`}
-                      contentStyle={{
-                        backgroundColor: 'rgba(23, 23, 23, 0.95)',
-                        borderColor: 'rgba(64, 64, 64, 0.5)',
-                        borderRadius: '8px',
-                        color: '#fff',
-                        fontSize: '12px',
-                      }}
-                    />
-                    <Bar dataKey="attendanceRate" fill="#4F46E5" name="Attendance Rate %" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="punctualityRate" fill="#10B981" name="Punctuality Rate %" radius={[4, 4, 0, 0]} />
+                    <CartesianGrid strokeDasharray="3 3" opacity={0.15} vertical={false} />
+                    <XAxis dataKey="department" {...axisProps} />
+                    <YAxis {...axisProps} domain={[70, 100]} />
+                    <Tooltip formatter={(v: any) => `${v}%`} {...tooltipStyle} cursor={barCursor} />
+                    <Bar {...barAnimation(0)} dataKey="attendanceRate" fill="#4F46E5" name="Attendance Rate %" radius={[4, 4, 0, 0]} />
+                    <Bar {...barAnimation(1)} dataKey="punctualityRate" fill="#10B981" name="Punctuality Rate %" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -641,19 +635,11 @@ export const AnalyticsPage: React.FC = () => {
               <div className="h-64 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={checkInDist} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
-                    <XAxis dataKey="bucket" tick={{ fontSize: 10 }} />
-                    <YAxis tick={{ fontSize: 11 }} />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: 'rgba(23, 23, 23, 0.95)',
-                        borderColor: 'rgba(64, 64, 64, 0.5)',
-                        borderRadius: '8px',
-                        color: '#fff',
-                        fontSize: '12px',
-                      }}
-                    />
-                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                    <CartesianGrid strokeDasharray="3 3" opacity={0.15} vertical={false} />
+                    <XAxis dataKey="bucket" {...axisProps} />
+                    <YAxis {...axisProps} />
+                    <Tooltip {...tooltipStyle} cursor={barCursor} />
+                    <Bar {...barAnimation(0)} dataKey="count" radius={[4, 4, 0, 0]}>
                       {checkInDist.map((entry, index) => (
                         <Cell
                           key={`cell-${index}`}
@@ -680,21 +666,12 @@ export const AnalyticsPage: React.FC = () => {
               <div className="h-56 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={dowPatterns} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
-                    <XAxis dataKey="day" tick={{ fontSize: 11 }} />
-                    <YAxis tick={{ fontSize: 11 }} />
-                    <Tooltip
-                      formatter={(v: any) => `${v}%`}
-                      contentStyle={{
-                        backgroundColor: 'rgba(23, 23, 23, 0.95)',
-                        borderColor: 'rgba(64, 64, 64, 0.5)',
-                        borderRadius: '8px',
-                        color: '#fff',
-                        fontSize: '12px',
-                      }}
-                    />
-                    <Bar dataKey="lateRate" fill="#F59E0B" name="Late Arrival %" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="absentRate" fill="#EF4444" name="Absenteeism %" radius={[4, 4, 0, 0]} />
+                    <CartesianGrid strokeDasharray="3 3" opacity={0.15} vertical={false} />
+                    <XAxis dataKey="day" {...axisProps} />
+                    <YAxis {...axisProps} />
+                    <Tooltip formatter={(v: any) => `${v}%`} {...tooltipStyle} cursor={barCursor} />
+                    <Bar {...barAnimation(0)} dataKey="lateRate" fill="#F59E0B" name="Late Arrival %" radius={[4, 4, 0, 0]} />
+                    <Bar {...barAnimation(1)} dataKey="absentRate" fill="#EF4444" name="Absenteeism %" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>

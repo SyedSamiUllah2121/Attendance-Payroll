@@ -43,11 +43,11 @@ export const Modal: React.FC<ModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto no-print">
       <div
-        className="fixed inset-0 bg-neutral-900/40 dark:bg-black/60 backdrop-blur-xs transition-opacity"
+        className="fixed inset-0 bg-neutral-900/40 dark:bg-black/60 backdrop-blur-xs animate-fade-in"
         onClick={onClose}
       />
       <div
-        className={`relative w-full ${maxWidthClass} bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl overflow-hidden z-10 transition-all`}
+        className={`relative w-full ${maxWidthClass} bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl overflow-hidden z-10 animate-scale-in`}
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100 dark:border-neutral-800">
           <div>

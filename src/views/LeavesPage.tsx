@@ -19,9 +19,13 @@ import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { differenceInBusinessDays, parseISO, addDays } from 'date-fns';
 import { computeAnnualLeave, getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
+import { reviewLeave } from '../services/approvalService';
 
 export const LeavesPage: React.FC = () => {
-  const { user, isHR, isEmployee } = useAuth();
+  const { user, isEmployee, can } = useAuth();
+  const canViewAll = can('leaves.view');
+  const canCreateForOthers = can('leaves.create');
+  const canApprove = can('leaves.approve');
   const { settings } = useSettings();
   const { success, warning, error } = useNotification();
 
@@ -36,15 +40,23 @@ export const LeavesPage: React.FC = () => {
 
   // Apply modal
   const [isApplyModalOpen, setIsApplyModalOpen] = useState(false);
-  const [applyForm, setApplyForm] = useState({
-    employeeId: user?.employeeId || 'EMP-001',
-    leaveType: 'Annual' as LeaveType,
-    fromDate: '2026-10-05',
-    toDate: '2026-10-07',
-    isHalfDay: false,
-    halfDayType: 'First Half' as 'First Half' | 'Second Half',
-    reason: '',
-  });
+  const blankForm = (employeeId: string) => {
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return {
+      employeeId,
+      leaveType: 'Annual' as LeaveType,
+      fromDate: today,
+      toDate: today,
+      isHalfDay: false,
+      halfDayType: 'First Half' as 'First Half' | 'Second Half',
+      reason: '',
+      // Staff entering a request on someone's behalf
+      source: 'Message' as NonNullable<LeaveRequest['requestSource']>,
+      approveNow: false,
+    };
+  };
+  const [applyForm, setApplyForm] = useState(() => blankForm(user?.employeeId || 'EMP-001'));
 
   // Review Reject modal
   const [rejectingLeave, setRejectingLeave] = useState<LeaveRequest | null>(null);
@@ -85,8 +97,14 @@ export const LeavesPage: React.FC = () => {
     applyForm.isHalfDay
   );
 
-  // Quotas for current user
-  const userLeaves = leaves.filter((l) => l.employeeId === currentEmpId && l.status === 'Approved');
+  // Whose balances to show: the employee picked in the form when staff enter a request for
+  // someone else, otherwise the signed-in user.
+  const enteringForOthers = isApplyModalOpen && canCreateForOthers;
+  const balanceEmpId = enteringForOthers ? applyForm.employeeId : currentEmpId;
+  const showOwnBalances = isEmployee || !!user?.employeeId;
+
+  // Quotas
+  const userLeaves = leaves.filter((l) => l.employeeId === balanceEmpId && l.status === 'Approved');
   const usedAnnual = userLeaves
     .filter((l) => l.leaveType === 'Annual')
     .reduce((acc, l) => acc + l.daysCount, 0);
@@ -98,13 +116,13 @@ export const LeavesPage: React.FC = () => {
     .reduce((acc, l) => acc + l.daysCount, 0);
 
   // Annual leave is earned monthly; see the Annual Leave module.
-  const currentEmp = employees.find((e) => e.id === currentEmpId);
+  const currentEmp = employees.find((e) => e.id === balanceEmpId);
   const annualSummary = currentEmp
     ? computeAnnualLeave(currentEmp, leaves, getAnnualLeavePolicy(settings), new Date().getFullYear())
     : undefined;
   const annualQuota = annualSummary
     ? annualSummary.carriedForward + annualSummary.accrued
-    : settings.leaves?.annual ?? settings.leaveQuotas?.Annual ?? 14;
+    : settings.leaves?.annual ?? settings.leaveQuotas?.Annual ?? 30;
   const sickQuota = settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10;
   const casualQuota = settings.leaves?.casual ?? settings.leaveQuotas?.Casual ?? 8;
 
@@ -138,7 +156,7 @@ export const LeavesPage: React.FC = () => {
 
     const newLeave: LeaveRequest = {
       id: `lv-${Date.now()}`,
-      employeeId: isEmployee ? currentEmpId : applyForm.employeeId,
+      employeeId: enteringForOthers ? applyForm.employeeId : currentEmpId,
       leaveType: applyForm.leaveType,
       fromDate: applyForm.fromDate,
       toDate: applyForm.toDate,
@@ -147,55 +165,39 @@ export const LeavesPage: React.FC = () => {
       status: 'Pending',
       appliedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
+      ...(enteringForOthers && applyForm.employeeId !== user?.employeeId
+        ? { enteredBy: user?.name, requestSource: applyForm.source }
+        : { requestSource: 'Self' as const }),
     };
 
     storageService.addLeave(newLeave);
-    success('Leave Request Submitted', `Submitted ${currentDaysCount} days ${applyForm.leaveType} leave request.`);
-    reloadLeaves();
     setIsApplyModalOpen(false);
+
+    // The head manager can approve in the same step; everyone else's entries wait for approval.
+    if (applyForm.approveNow && canApprove) {
+      handleReview(newLeave, 'Approved', `Entered and approved by ${user?.name}`);
+      return;
+    }
+    const empName = employees.find((e) => e.id === newLeave.employeeId)?.name || newLeave.employeeId;
+    success(
+      'Leave Request Submitted',
+      enteringForOthers
+        ? `${currentDaysCount} day ${applyForm.leaveType} leave entered for ${empName} · awaiting Head Manager approval`
+        : `Submitted ${currentDaysCount} days ${applyForm.leaveType} leave request.`
+    );
+    reloadLeaves();
   };
 
   // Handle Review Action (Approve / Reject)
   const handleReview = (leave: LeaveRequest, action: 'Approved' | 'Rejected', comment = '') => {
-    const updated: LeaveRequest = {
-      ...leave,
-      status: action,
-      reviewedBy: user?.name || 'Administrator',
-      reviewedAt: new Date().toISOString(),
-      reviewComment: comment || (action === 'Approved' ? 'Approved as requested' : 'Declined'),
-    };
-    storageService.updateLeave(updated);
-
-    // If approved, update attendance records to "On Leave"
-    if (action === 'Approved') {
-      let curr = new Date(leave.fromDate + 'T00:00:00');
-      const end = new Date(leave.toDate + 'T00:00:00');
-
-      while (curr <= end) {
-        const dow = curr.getDay();
-        const dateStr = curr.toISOString().slice(0, 10);
-        if (dow !== 0 && dow !== 6) {
-          storageService.saveOrUpdateAttendanceRecord({
-            id: `att-${leave.employeeId}-${dateStr}`,
-            employeeId: leave.employeeId,
-            date: dateStr,
-            status: 'On Leave',
-            workedMinutes: 0,
-            overtimeMinutes: 0,
-            notes: `${leave.leaveType} Leave Approved`,
-          });
-        }
-        curr = addDays(curr, 1);
-      }
-    }
-
+    reviewLeave(leave, action, user?.name || 'Head Manager', comment);
     success(`Leave ${action}`, `Request for ${leave.employeeId} marked as ${action}.`);
     reloadLeaves();
   };
 
   // Filtered leaves
   const displayedLeaves = leaves.filter((l) => {
-    if (isEmployee && l.employeeId !== currentEmpId) return false;
+    if (!canViewAll && l.employeeId !== currentEmpId) return false;
     if (statusFilter && l.status !== statusFilter) return false;
     if (typeFilter && l.leaveType !== typeFilter) return false;
     if (deptFilter) {
@@ -218,26 +220,34 @@ export const LeavesPage: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={() => {
-            setApplyForm({
-              employeeId: currentEmpId,
-              leaveType: 'Annual',
-              fromDate: '2026-10-05',
-              toDate: '2026-10-07',
-              isHalfDay: false,
-              halfDayType: 'First Half',
-              reason: '',
-            });
-            setIsApplyModalOpen(true);
-          }}
-          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 self-start sm:self-auto transition-colors cursor-pointer"
-        >
-          <Plus className="w-4 h-4" /> Apply for Leave
-        </button>
+        {(canCreateForOthers || showOwnBalances) && (
+          <button
+            onClick={() => {
+              setApplyForm(
+                blankForm(
+                  canCreateForOthers
+                    ? employees.find((e) => e.status === 'Active')?.id || currentEmpId
+                    : currentEmpId
+                )
+              );
+              setIsApplyModalOpen(true);
+            }}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 self-start sm:self-auto transition-colors cursor-pointer"
+          >
+            <Plus className="w-4 h-4" /> {canCreateForOthers ? 'Add Leave Request' : 'Apply for Leave'}
+          </button>
+        )}
       </div>
 
-      {/* Leave Balances Cards */}
+      {canCreateForOthers && !canApprove && (
+        <div className="p-3 rounded-xl bg-sky-50 dark:bg-sky-950/40 border border-sky-100 dark:border-sky-900 text-xs text-sky-800 dark:text-sky-300">
+          You can enter leave requests received by message, phone or email. They are sent to the
+          Head Manager, who approves or rejects them.
+        </div>
+      )}
+
+      {/* Leave Balances Cards (own balances) */}
+      {showOwnBalances && (
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="p-4 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs">
           <span className="text-xs text-neutral-400 font-medium">Annual Leave</span>
@@ -298,6 +308,7 @@ export const LeavesPage: React.FC = () => {
           <p className="text-[11px] text-neutral-400 mt-3">Refreshes Jan 1, 2027</p>
         </div>
       </div>
+      )}
 
       {/* Filter Bar */}
       <div className="bg-white dark:bg-neutral-900 p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xs flex flex-wrap items-center justify-between gap-3">
@@ -325,7 +336,7 @@ export const LeavesPage: React.FC = () => {
             <option value="Unpaid">Unpaid Leave</option>
           </select>
 
-          {isHR && (
+          {canViewAll && (
             <select
               value={deptFilter}
               onChange={(e) => setDeptFilter(e.target.value)}
@@ -371,7 +382,9 @@ export const LeavesPage: React.FC = () => {
                 <th className="py-3 px-4">Days</th>
                 <th className="py-3 px-4">Reason</th>
                 <th className="py-3 px-4">Status</th>
-                {isHR && <th className="py-3 px-4 text-right">Actions</th>}
+                {(canApprove || canCreateForOthers) && (
+                  <th className="py-3 px-4 text-right">Actions</th>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
@@ -413,6 +426,12 @@ export const LeavesPage: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300 max-w-xs">
                         <p className="line-clamp-2">{lv.reason}</p>
+                        {lv.enteredBy && (
+                          <span className="text-[11px] text-sky-600 dark:text-sky-400 block mt-0.5">
+                            Entered by {lv.enteredBy}
+                            {lv.requestSource && lv.requestSource !== 'Self' ? ` · via ${lv.requestSource}` : ''}
+                          </span>
+                        )}
                         {lv.reviewedBy && (
                           <span className="text-[11px] text-neutral-400 block mt-0.5">
                             {lv.status} by {lv.reviewedBy}
@@ -422,9 +441,13 @@ export const LeavesPage: React.FC = () => {
                       <td className="py-3.5 px-4">
                         <Badge status={lv.status} />
                       </td>
-                      {isHR && (
+                      {(canApprove || canCreateForOthers) && (
                         <td className="py-3.5 px-4 text-right">
-                          {lv.status === 'Pending' ? (
+                          {lv.status === 'Pending' && !canApprove ? (
+                            <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                              Awaiting Head Manager
+                            </span>
+                          ) : lv.status === 'Pending' ? (
                             <div className="flex items-center justify-end gap-1.5">
                               <button
                                 onClick={() => handleReview(lv, 'Approved')}
@@ -461,27 +484,55 @@ export const LeavesPage: React.FC = () => {
         <Modal
           isOpen={isApplyModalOpen}
           onClose={() => setIsApplyModalOpen(false)}
-          title="Apply for Leave"
-          subtitle="Submit time-off dates for manager approval"
+          title={canCreateForOthers ? 'Add Leave Request' : 'Apply for Leave'}
+          subtitle={
+            canCreateForOthers
+              ? 'Enter a leave request received from an employee'
+              : 'Submit time-off dates for manager approval'
+          }
           maxWidth="md"
         >
           <form onSubmit={handleApplyLeave} className="space-y-4">
-            {isHR && (
-              <div>
-                <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
-                  Employee
-                </label>
-                <select
-                  value={applyForm.employeeId}
-                  onChange={(e) => setApplyForm({ ...applyForm, employeeId: e.target.value })}
-                  className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
-                >
-                  {employees.map((emp) => (
-                    <option key={emp.id} value={emp.id}>
-                      {emp.name} ({emp.id}) - {emp.department}
-                    </option>
-                  ))}
-                </select>
+            {canCreateForOthers && (
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
+                    Employee *
+                  </label>
+                  <select
+                    value={applyForm.employeeId}
+                    onChange={(e) => setApplyForm({ ...applyForm, employeeId: e.target.value })}
+                    className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
+                  >
+                    {employees
+                      .filter((emp) => emp.status === 'Active')
+                      .map((emp) => (
+                        <option key={emp.id} value={emp.id}>
+                          {emp.name} ({emp.id}) - {emp.department}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
+                    Received via
+                  </label>
+                  <select
+                    value={applyForm.source}
+                    onChange={(e) =>
+                      setApplyForm({
+                        ...applyForm,
+                        source: e.target.value as NonNullable<LeaveRequest['requestSource']>,
+                      })
+                    }
+                    className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
+                  >
+                    <option value="Message">Message</option>
+                    <option value="Phone">Phone</option>
+                    <option value="Email">Email</option>
+                    <option value="In person">In person</option>
+                  </select>
+                </div>
               </div>
             )}
 
@@ -587,10 +638,25 @@ export const LeavesPage: React.FC = () => {
                 rows={3}
                 value={applyForm.reason}
                 onChange={(e) => setApplyForm({ ...applyForm, reason: e.target.value })}
-                placeholder="State your reason clearly..."
+                placeholder={
+                  canCreateForOthers
+                    ? 'Reason as given in the message, e.g. "Family wedding in Lahore"'
+                    : 'State your reason clearly...'
+                }
                 className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
               />
             </div>
+
+            {canApprove && canCreateForOthers && (
+              <label className="flex items-center gap-2 text-xs text-neutral-700 dark:text-neutral-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={applyForm.approveNow}
+                  onChange={(e) => setApplyForm({ ...applyForm, approveNow: e.target.checked })}
+                />
+                Approve immediately (skip the pending step)
+              </label>
+            )}
 
             <div className="flex items-center justify-end gap-3 pt-3">
               <button
@@ -604,7 +670,11 @@ export const LeavesPage: React.FC = () => {
                 type="submit"
                 className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-xs"
               >
-                Submit Leave Application
+                {applyForm.approveNow && canApprove
+                  ? 'Save & Approve'
+                  : canCreateForOthers
+                  ? 'Submit for Approval'
+                  : 'Submit Leave Application'}
               </button>
             </div>
           </form>

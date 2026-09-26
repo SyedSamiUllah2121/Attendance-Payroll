@@ -79,7 +79,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
           return (
             <div
               key={toast.id}
-              className={`pointer-events-auto flex items-start gap-3 p-3.5 rounded-lg border shadow-sm transition-all duration-200 ${bgMap[toast.type]}`}
+              className={`pointer-events-auto flex items-start gap-3 p-3.5 rounded-lg border shadow-md animate-toast ${bgMap[toast.type]}`}
             >
               <IconComponent className={`w-5 h-5 shrink-0 mt-0.5 ${iconColorMap}`} />
               <div className="flex-1 min-w-0">

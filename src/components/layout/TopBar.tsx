@@ -14,11 +14,15 @@ import {
   User,
   ShieldCheck,
   Sparkles,
+  X,
 } from 'lucide-react';
-import { DEMO_ACCOUNTS, useAuth } from '../../context/AuthContext';
+import { getDemoAccounts, useAuth } from '../../context/AuthContext';
+import { ROLE_LABELS } from '../../utils/permissions';
 import { useSettings } from '../../context/SettingsContext';
 import { LeaveRequest, RegularizationRequest } from '../../types';
 import { storageService } from '../../services/storageService';
+import { reviewLeave, reviewRegularization } from '../../services/approvalService';
+import { formatTime12 } from '../common/TimeInput';
 import { useNotification } from '../../context/NotificationContext';
 
 interface TopBarProps {
@@ -38,7 +42,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   pendingRegularizations,
   onRefreshData,
 }) => {
-  const { user, quickLogin, logout } = useAuth();
+  const { user, quickLogin, logout, can } = useAuth();
   const { darkMode, toggleDarkMode } = useSettings();
   const { success } = useNotification();
 
@@ -49,7 +53,11 @@ export const TopBar: React.FC<TopBarProps> = ({
   const notifRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
 
-  const totalPending = pendingLeaves.length + pendingRegularizations.length;
+  // Only show requests this account is allowed to approve.
+  const visibleLeaves = can('leaves.approve') ? pendingLeaves : [];
+  const visibleRegs = can('attendance.approve') ? pendingRegularizations : [];
+  const totalPending = visibleLeaves.length + visibleRegs.length;
+  const demoAccounts = profileOpen ? getDemoAccounts() : [];
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -64,52 +72,50 @@ export const TopBar: React.FC<TopBarProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const handleQuickApproveLeave = (leave: LeaveRequest, e: React.MouseEvent) => {
+  // Names for the approval list (loaded when the dropdown opens)
+  const employees = notificationsOpen ? storageService.getEmployees() : [];
+  const empById = (id: string) => employees.find((e) => e.id === id);
+
+  const formatDay = (dateStr: string) =>
+    new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+  const reviewer = user?.name || 'Manager';
+
+  const handleLeave = (leave: LeaveRequest, action: 'Approved' | 'Rejected', e: React.MouseEvent) => {
     e.stopPropagation();
-    storageService.updateLeave({
-      ...leave,
-      status: 'Approved',
-      reviewedBy: user?.name || 'Manager',
-      reviewedAt: new Date().toISOString(),
-      reviewComment: 'Approved via quick notification action.',
-    });
-    success('Leave Approved', `Approved leave for ${leave.employeeId}`);
+    reviewLeave(leave, action, reviewer);
+    const name = empById(leave.employeeId)?.name || leave.employeeId;
+    success(`Leave ${action}`, `${name}'s ${leave.leaveType.toLowerCase()} leave was ${action.toLowerCase()}.`);
     onRefreshData();
   };
 
-  const handleQuickApproveReg = (reg: RegularizationRequest, e: React.MouseEvent) => {
+  const handleReg = (reg: RegularizationRequest, action: 'Approved' | 'Rejected', e: React.MouseEvent) => {
     e.stopPropagation();
-    storageService.updateRegularization({
-      ...reg,
-      status: 'Approved',
-      reviewedBy: user?.name || 'Manager',
-      reviewedAt: new Date().toISOString(),
-      reviewComment: 'Approved attendance regularization.',
-    });
-
-    // Also update actual attendance record
-    const records = storageService.getAttendance();
-    const existing = records.find(
-      (r) => r.employeeId === reg.employeeId && r.date === reg.date
-    );
-    if (existing) {
-      storageService.saveOrUpdateAttendanceRecord({
-        ...existing,
-        checkIn: reg.requestedCheckIn,
-        checkOut: reg.requestedCheckOut,
-        status: 'Present',
-        notes: `Regularized by ${user?.name || 'Manager'}`,
-      });
-    }
-
-    success('Regularization Approved', `Attendance corrected for ${reg.date}`);
+    reviewRegularization(reg, action, reviewer);
+    const name = empById(reg.employeeId)?.name || reg.employeeId;
+    success(`Correction ${action}`, `${name}'s attendance for ${formatDay(reg.date)} was ${action.toLowerCase()}.`);
     onRefreshData();
+  };
+
+  const openPage = (page: string, attendanceView?: string) => {
+    if (attendanceView) {
+      try {
+        sessionStorage.setItem('workpulse_attendance_view', attendanceView);
+      } catch {
+        // ignore: the page just opens on its default tab
+      }
+      // If the page is already open, tell it to switch tabs
+      window.dispatchEvent(new CustomEvent('workpulse:attendance-view', { detail: attendanceView }));
+    }
+    setNotificationsOpen(false);
+    onNavigateTab(page);
   };
 
   const tabLabels: Record<string, string> = {
     dashboard: 'Dashboard',
     attendance: 'Attendance Management',
     leaves: 'Leave Management',
+    users: 'Users & Access',
     'annual-leave': 'Annual Leave',
     employees: 'Employee Directory',
     payroll: 'Payroll Management',
@@ -121,6 +127,13 @@ export const TopBar: React.FC<TopBarProps> = ({
     reports: 'Reports & Exports',
     settings: 'Company Settings',
   };
+
+  // On every page change: start at the top and name the browser tab after the page
+  useEffect(() => {
+    window.scrollTo({ top: 0 });
+    document.title = `${tabLabels[currentTab] || 'Dashboard'} · WorkPulse`;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTab]);
 
   return (
     <header className="h-16 px-4 md:px-6 bg-white dark:bg-neutral-900 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between sticky top-0 z-30 transition-colors no-print">
@@ -186,109 +199,167 @@ export const TopBar: React.FC<TopBarProps> = ({
         <div className="relative" ref={notifRef}>
           <button
             onClick={() => setNotificationsOpen((prev) => !prev)}
-            className="p-2 text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors relative cursor-pointer"
-            aria-label="Pending Approvals Notifications"
+            className={`relative p-2 rounded-lg transition-colors cursor-pointer ${
+              notificationsOpen
+                ? 'bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100'
+                : 'text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+            }`}
+            aria-label={`Pending approvals${totalPending ? `: ${totalPending}` : ''}`}
+            title="Pending approvals"
           >
-            <Bell className="w-4 h-4" />
+            <Bell className="w-[18px] h-[18px]" />
             {totalPending > 0 && (
-              <span className="absolute top-1.5 right-1.5 min-w-4 h-4 px-1 rounded-full bg-amber-500 text-[10px] font-bold text-white flex items-center justify-center">
-                {totalPending}
+              <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-[10px] font-bold leading-none text-white flex items-center justify-center ring-2 ring-white dark:ring-neutral-900 pointer-events-none">
+                {totalPending > 99 ? '99+' : totalPending}
               </span>
             )}
           </button>
 
           {/* Notifications Dropdown */}
           {notificationsOpen && (
-            <div className="absolute right-0 mt-2 w-80 md:w-96 bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl py-2 z-50">
-              <div className="px-4 py-2 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
-                <div>
-                  <h4 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
-                    Pending Approvals
-                  </h4>
-                  <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                    {totalPending} request{totalPending !== 1 ? 's' : ''} awaiting action
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    onNavigateTab('attendance');
-                    setNotificationsOpen(false);
-                  }}
-                  className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-medium"
-                >
-                  View All
-                </button>
+            <div className="absolute right-0 mt-2 w-[min(400px,calc(100vw-2rem))] origin-top-right animate-pop bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl z-50 overflow-hidden">
+              <div className="px-4 py-3 border-b border-neutral-100 dark:border-neutral-800">
+                <h4 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+                  Pending Approvals
+                </h4>
+                <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                  {totalPending === 0
+                    ? 'Nothing waiting for you'
+                    : `${totalPending} request${totalPending !== 1 ? 's' : ''} awaiting your decision`}
+                </p>
               </div>
 
-              <div className="max-h-80 overflow-y-auto divide-y divide-neutral-100 dark:divide-neutral-800">
+              <div className="max-h-[60vh] overflow-y-auto">
                 {totalPending === 0 ? (
-                  <div className="py-8 text-center text-xs text-neutral-400">
+                  <div className="py-10 text-center text-xs text-neutral-400">
                     <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto mb-2 opacity-70" />
                     All approvals are up to date!
                   </div>
                 ) : (
                   <>
-                    {/* Pending Leaves */}
-                    {pendingLeaves.map((lv) => (
-                      <div
-                        key={lv.id}
-                        className="p-3 hover:bg-neutral-50 dark:hover:bg-neutral-800/50 transition-colors flex items-start justify-between gap-3 text-xs"
-                      >
-                        <div className="flex items-start gap-2.5">
-                          <div className="p-1.5 rounded-lg bg-sky-100 dark:bg-sky-950 text-sky-600 dark:text-sky-400 shrink-0 mt-0.5">
-                            <CalendarCheck className="w-3.5 h-3.5" />
-                          </div>
-                          <div>
-                            <p className="font-semibold text-neutral-900 dark:text-neutral-100">
-                              {lv.employeeId} · {lv.leaveType} Leave
-                            </p>
-                            <p className="text-neutral-500 dark:text-neutral-400 text-[11px]">
-                              {lv.fromDate} to {lv.toDate} ({lv.daysCount}d)
-                            </p>
-                            <p className="text-neutral-600 dark:text-neutral-300 italic text-[11px] mt-0.5 line-clamp-1">
-                              &ldquo;{lv.reason}&rdquo;
-                            </p>
-                          </div>
+                    {visibleLeaves.length > 0 && (
+                      <section>
+                        <div className="sticky top-0 z-10 px-4 py-2 bg-neutral-50 dark:bg-neutral-800/90 backdrop-blur flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+                            Leave requests · {visibleLeaves.length}
+                          </span>
+                          <button
+                            onClick={() => openPage('leaves')}
+                            className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                          >
+                            Open Leave Management
+                          </button>
                         </div>
-                        <button
-                          onClick={(e) => handleQuickApproveLeave(lv, e)}
-                          className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-medium shrink-0 flex items-center gap-1 shadow-xs"
-                        >
-                          <Check className="w-3 h-3" /> Approve
-                        </button>
-                      </div>
-                    ))}
+                        <ul className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                          {visibleLeaves.map((lv) => {
+                            const emp = empById(lv.employeeId);
+                            return (
+                              <li key={lv.id} className="px-4 py-3 hover:bg-neutral-50 dark:hover:bg-neutral-800/40 transition-colors">
+                                <div className="flex items-start gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-sky-100 dark:bg-sky-950 text-sky-700 dark:text-sky-300 text-xs font-bold flex items-center justify-center shrink-0">
+                                    {(emp?.name || lv.employeeId)[0]}
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-xs font-semibold text-neutral-900 dark:text-neutral-100 truncate">
+                                      {emp?.name || lv.employeeId}
+                                      <span className="font-normal text-neutral-400"> · {emp?.department || lv.employeeId}</span>
+                                    </p>
+                                    <p className="text-[11px] text-neutral-600 dark:text-neutral-300 mt-0.5">
+                                      <span className="font-medium">{lv.leaveType} leave</span> ·{' '}
+                                      {formatDay(lv.fromDate)}
+                                      {lv.toDate !== lv.fromDate && ` – ${formatDay(lv.toDate)}`} ·{' '}
+                                      {lv.daysCount} day{lv.daysCount === 1 ? '' : 's'}
+                                    </p>
+                                    <p className="text-[11px] text-neutral-500 dark:text-neutral-400 italic mt-0.5 line-clamp-1">
+                                      &ldquo;{lv.reason}&rdquo;
+                                    </p>
+                                    {lv.enteredBy && (
+                                      <p className="text-[10px] text-sky-600 dark:text-sky-400 mt-0.5">
+                                        Entered by {lv.enteredBy}
+                                        {lv.requestSource && lv.requestSource !== 'Self' ? ` · via ${lv.requestSource}` : ''}
+                                      </p>
+                                    )}
+                                    <div className="flex items-center gap-1.5 mt-2">
+                                      <button
+                                        onClick={(e) => handleLeave(lv, 'Approved', e)}
+                                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Check className="w-3 h-3" /> Approve
+                                      </button>
+                                      <button
+                                        onClick={(e) => handleLeave(lv, 'Rejected', e)}
+                                        className="px-2.5 py-1 border border-neutral-200 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 hover:border-rose-300 hover:text-rose-600 rounded-md text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <X className="w-3 h-3" /> Reject
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </section>
+                    )}
 
-                    {/* Pending Regularizations */}
-                    {pendingRegularizations.map((reg) => (
-                      <div
-                        key={reg.id}
-                        className="p-3 hover:bg-neutral-50 dark:hover:bg-neutral-800/50 transition-colors flex items-start justify-between gap-3 text-xs"
-                      >
-                        <div className="flex items-start gap-2.5">
-                          <div className="p-1.5 rounded-lg bg-amber-100 dark:bg-amber-950 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5">
-                            <Clock className="w-3.5 h-3.5" />
-                          </div>
-                          <div>
-                            <p className="font-semibold text-neutral-900 dark:text-neutral-100">
-                              {reg.employeeId} · Attendance Correction
-                            </p>
-                            <p className="text-neutral-500 dark:text-neutral-400 text-[11px]">
-                              {reg.date}: {reg.requestedCheckIn} – {reg.requestedCheckOut}
-                            </p>
-                            <p className="text-neutral-600 dark:text-neutral-300 italic text-[11px] mt-0.5 line-clamp-1">
-                              &ldquo;{reg.reason}&rdquo;
-                            </p>
-                          </div>
+                    {visibleRegs.length > 0 && (
+                      <section>
+                        <div className="sticky top-0 z-10 px-4 py-2 bg-neutral-50 dark:bg-neutral-800/90 backdrop-blur flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+                            Attendance corrections · {visibleRegs.length}
+                          </span>
+                          <button
+                            onClick={() => openPage('attendance', 'regularizations')}
+                            className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                          >
+                            Open Corrections
+                          </button>
                         </div>
-                        <button
-                          onClick={(e) => handleQuickApproveReg(reg, e)}
-                          className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-medium shrink-0 flex items-center gap-1 shadow-xs"
-                        >
-                          <Check className="w-3 h-3" /> Approve
-                        </button>
-                      </div>
-                    ))}
+                        <ul className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                          {visibleRegs.map((reg) => {
+                            const emp = empById(reg.employeeId);
+                            return (
+                              <li key={reg.id} className="px-4 py-3 hover:bg-neutral-50 dark:hover:bg-neutral-800/40 transition-colors">
+                                <div className="flex items-start gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-xs font-bold flex items-center justify-center shrink-0">
+                                    {(emp?.name || reg.employeeId)[0]}
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-xs font-semibold text-neutral-900 dark:text-neutral-100 truncate">
+                                      {emp?.name || reg.employeeId}
+                                      <span className="font-normal text-neutral-400"> · {emp?.department || reg.employeeId}</span>
+                                    </p>
+                                    <p className="text-[11px] text-neutral-600 dark:text-neutral-300 mt-0.5">
+                                      <span className="font-medium">{formatDay(reg.date)}</span> · change to{' '}
+                                      <span className="font-mono">
+                                        {formatTime12(reg.requestedCheckIn.slice(0, 5))} – {formatTime12(reg.requestedCheckOut.slice(0, 5))}
+                                      </span>
+                                    </p>
+                                    <p className="text-[11px] text-neutral-500 dark:text-neutral-400 italic mt-0.5 line-clamp-1">
+                                      &ldquo;{reg.reason}&rdquo;
+                                    </p>
+                                    <div className="flex items-center gap-1.5 mt-2">
+                                      <button
+                                        onClick={(e) => handleReg(reg, 'Approved', e)}
+                                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Check className="w-3 h-3" /> Approve
+                                      </button>
+                                      <button
+                                        onClick={(e) => handleReg(reg, 'Rejected', e)}
+                                        className="px-2.5 py-1 border border-neutral-200 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 hover:border-rose-300 hover:text-rose-600 rounded-md text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <X className="w-3 h-3" /> Reject
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </section>
+                    )}
                   </>
                 )}
               </div>
@@ -310,18 +381,14 @@ export const TopBar: React.FC<TopBarProps> = ({
                 {user?.name || 'Account'}
               </span>
               <span className="text-[10px] text-neutral-500 dark:text-neutral-400 capitalize">
-                {user?.role === 'admin'
-                  ? 'Admin'
-                  : user?.role === 'hr'
-                  ? 'HR Manager'
-                  : 'Employee'}
+                {user ? ROLE_LABELS[user.role] : ''}
               </span>
             </div>
             <ChevronDown className="w-3.5 h-3.5 text-neutral-400" />
           </button>
 
           {profileOpen && (
-            <div className="absolute right-0 mt-2 w-72 bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl py-2 z-50">
+            <div className="absolute right-0 mt-2 w-72 origin-top-right animate-pop bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl py-2 z-50">
               <div className="px-4 py-2 border-b border-neutral-100 dark:border-neutral-800">
                 <p className="text-xs font-semibold text-neutral-900 dark:text-neutral-100">
                   {user?.name}
@@ -331,7 +398,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                 </p>
                 <div className="mt-1 flex items-center gap-1.5">
                   <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 uppercase">
-                    {user?.role}
+                    {user ? ROLE_LABELS[user.role] : ''}
                   </span>
                   <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
                     {user?.department}
@@ -345,13 +412,13 @@ export const TopBar: React.FC<TopBarProps> = ({
                   Switch Demo Account
                 </p>
                 <div className="space-y-1">
-                  {DEMO_ACCOUNTS.map((acc) => {
-                    const isSelected = user?.role === acc.role;
+                  {demoAccounts.map((acc) => {
+                    const isSelected = user?.id === acc.id;
                     return (
                       <button
-                        key={acc.role}
+                        key={acc.id}
                         onClick={() => {
-                          quickLogin(acc.role);
+                          quickLogin(acc.id);
                           setProfileOpen(false);
                           success(`Switched to ${acc.name}`, `Now acting as ${acc.designation}`);
                         }}
@@ -364,7 +431,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                         <div className="text-left">
                           <p className="font-semibold leading-tight">{acc.name}</p>
                           <p className="text-[10px] text-neutral-500 dark:text-neutral-400">
-                            {acc.designation}
+                            {ROLE_LABELS[acc.role]}
                           </p>
                         </div>
                         {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />}

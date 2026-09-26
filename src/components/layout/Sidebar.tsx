@@ -16,7 +16,9 @@ import {
   CalendarCheck,
   Building2,
   CalendarRange,
+  KeyRound,
 } from 'lucide-react';
+import { ROLE_LABELS } from '../../utils/permissions';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 
@@ -39,7 +41,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onCloseMobile,
   pendingApprovalsCount,
 }) => {
-  const { user, isAdmin, isHR } = useAuth();
+  const { user, isAdmin, can, canOpen } = useAuth();
   const { settings } = useSettings();
 
   const handleNavClick = (tab: string) => {
@@ -47,91 +49,86 @@ export const Sidebar: React.FC<SidebarProps> = ({
     onCloseMobile();
   };
 
-  // Define navigation items based on role
+  // Navigation items; each is shown only if the signed-in role can open that page
   const navItems = [
     {
       id: 'dashboard',
       label: 'Dashboard',
       icon: LayoutDashboard,
-      roles: ['admin', 'hr', 'employee'],
     },
     {
       id: 'attendance',
       label: 'Attendance',
       icon: Clock,
-      badge: pendingApprovalsCount > 0 && isHR ? pendingApprovalsCount : undefined,
-      roles: ['admin', 'hr', 'employee'],
+      badge:
+        pendingApprovalsCount > 0 && (can('leaves.approve') || can('attendance.approve'))
+          ? pendingApprovalsCount
+          : undefined,
     },
     {
       id: 'leaves',
       label: 'Leave Management',
       icon: CalendarCheck,
-      roles: ['admin', 'hr', 'employee'],
     },
     {
       id: 'annual-leave',
       label: 'Annual Leave',
       icon: CalendarRange,
-      roles: ['admin', 'hr', 'employee'],
     },
     {
       id: 'employees',
       label: 'Employees',
       icon: Users,
-      roles: ['admin', 'hr'],
     },
     {
       id: 'payroll',
       label: 'Payroll',
       icon: CreditCard,
-      roles: ['admin', 'hr'],
     },
     {
       id: 'payslips',
-      label: isHR ? 'All Payslips' : 'My Payslips',
+      label: can('payslips.view') ? 'All Payslips' : 'My Payslips',
       icon: FileText,
-      roles: ['admin', 'hr', 'employee'],
     },
     {
       id: 'loans',
       label: 'Loans & Advances',
       icon: DollarSign,
-      roles: ['admin', 'hr'],
     },
     {
       id: 'analytics',
-      label: isHR ? 'Analytics' : 'My Analytics',
+      label: can('analytics.view') ? 'Analytics' : 'My Analytics',
       icon: BarChart3,
-      roles: ['admin', 'hr', 'employee'],
     },
     {
       id: 'shifts',
       label: 'Shifts',
       icon: Clock,
-      roles: ['admin', 'hr'],
     },
     {
       id: 'holidays',
       label: 'Holidays',
       icon: CalendarDays,
-      roles: ['admin', 'hr', 'employee'],
     },
     {
       id: 'reports',
       label: 'Reports',
       icon: FileText,
-      roles: ['admin', 'hr'],
+    },
+    {
+      id: 'users',
+      label: 'Users & Access',
+      icon: KeyRound,
     },
     {
       id: 'settings',
       label: 'Settings',
       icon: Sliders,
-      roles: ['admin'],
     },
   ];
 
   const visibleItems = navItems.filter((item) =>
-    user ? item.roles.includes(user.role) : false
+    canOpen(item.id)
   );
 
   return (
@@ -139,7 +136,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Mobile backdrop */}
       {mobileOpen && (
         <div
-          className="fixed inset-0 z-40 bg-neutral-900/50 backdrop-blur-xs md:hidden"
+          className="fixed inset-0 z-40 bg-neutral-900/50 backdrop-blur-xs md:hidden animate-fade-in"
           onClick={onCloseMobile}
         />
       )}
@@ -237,7 +234,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <div
               className="w-8 h-8 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-semibold text-neutral-700 dark:text-neutral-300 shrink-0"
-              title={collapsed ? `${user?.name || 'User'} (${user?.role})` : undefined}
+              title={collapsed ? `${user?.name || 'User'} (${user ? ROLE_LABELS[user.role] : ''})` : undefined}
             >
               {user?.name
                 ? user.name
@@ -260,11 +257,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <UserCheck className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
                   )}
                   <span className="text-[10px] font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                    {user?.role === 'admin'
-                      ? 'Admin'
-                      : user?.role === 'hr'
-                      ? 'HR Manager'
-                      : 'Employee'}
+                    {user ? ROLE_LABELS[user.role] : ''}
                   </span>
                 </div>
               </div>
