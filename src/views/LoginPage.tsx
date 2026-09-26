@@ -41,7 +41,7 @@ const ProductShowcase: React.FC = () => {
   const circumference = 2 * Math.PI * 34;
 
   return (
-    <div className="relative h-full w-full overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800">
+    <div className="relative h-full w-full overflow-hidden rounded-l-[2rem] bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800">
       {/* Background texture */}
       <div
         className="absolute inset-0 opacity-[0.15]"
@@ -364,16 +364,16 @@ export const LoginPage: React.FC = () => {
                         disabled={submitting}
                         onClick={() => handleTestAccount(acc.email, acc.password)}
                         title={`Sign in as ${acc.email} / ${acc.password}`}
-                        className={`group flex items-center gap-2 px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-left hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/30 transition-colors cursor-pointer ${
+                        className={`group flex items-center gap-2 px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-left hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/30 transition-colors cursor-pointer ${
                           acc.role === 'manager' ? 'col-span-2' : ''
                         }`}
                       >
                         <Icon className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                        <span className="min-w-0 flex items-baseline gap-1.5">
-                          <span className="text-xs font-semibold text-neutral-700 dark:text-neutral-200 truncate">
+                        <span className="min-w-0">
+                          <span className="block text-xs font-semibold text-neutral-700 dark:text-neutral-200 truncate">
                             {ROLE_LABELS[acc.role]}
                           </span>
-                          <span className="text-[10px] font-mono text-neutral-400 truncate">{acc.email}</span>
+                          <span className="block text-[10px] font-mono text-neutral-400 truncate">{acc.email}</span>
                         </span>
                         <ArrowRight className="w-3.5 h-3.5 ml-auto text-neutral-300 group-hover:text-indigo-500 transition-colors shrink-0" />
                       </button>
@@ -389,7 +389,7 @@ export const LoginPage: React.FC = () => {
       </FitToScreen>
 
       {/* Illustration (large screens) */}
-      <div className="hidden lg:block p-3 h-dvh">
+      <div className="hidden lg:block h-dvh">
         <ProductShowcase />
       </div>
     </div>
