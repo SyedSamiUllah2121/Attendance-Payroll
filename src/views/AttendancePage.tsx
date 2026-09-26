@@ -14,6 +14,7 @@ import {
   List,
   AlertCircle,
   FileCheck,
+  UserCheck,
 } from 'lucide-react';
 import { AttendanceRecord, AttendanceStatus, Employee, RegularizationRequest, Shift } from '../types';
 import { storageService } from '../services/storageService';
@@ -23,6 +24,7 @@ import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { evaluateAttendanceStatus } from '../utils/attendanceEngine';
+import { MarkAttendanceSheet } from '../components/attendance/MarkAttendanceSheet';
 
 export const AttendancePage: React.FC = () => {
   const { user, isHR, isEmployee } = useAuth();
@@ -30,7 +32,7 @@ export const AttendancePage: React.FC = () => {
   const { success, warning, error } = useNotification();
 
   // Mode: Daily view, Monthly Matrix grid, or Regularization Requests
-  const [viewMode, setViewMode] = useState<'daily' | 'monthly' | 'regularizations'>('daily');
+  const [viewMode, setViewMode] = useState<'mark' | 'daily' | 'monthly' | 'regularizations'>('daily');
   const [selectedDate, setSelectedDate] = useState('2026-09-23');
   const [selectedMonth, setSelectedMonth] = useState('2026-09');
   const [departmentFilter, setDepartmentFilter] = useState('');
@@ -284,6 +286,18 @@ export const AttendancePage: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           {/* View switcher pills */}
           <div className="flex items-center bg-neutral-100 dark:bg-neutral-800 p-1 rounded-lg">
+            {isHR && (
+              <button
+                onClick={() => setViewMode('mark')}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                  viewMode === 'mark'
+                    ? 'bg-indigo-600 text-white shadow-xs'
+                    : 'text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300'
+                }`}
+              >
+                <UserCheck className="w-3.5 h-3.5" /> Mark Attendance
+              </button>
+            )}
             <button
               onClick={() => setViewMode('daily')}
               className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors ${
@@ -348,7 +362,18 @@ export const AttendancePage: React.FC = () => {
         </div>
       </div>
 
+      {viewMode === 'mark' && isHR && (
+        <MarkAttendanceSheet
+          employees={employees}
+          shifts={shifts}
+          attendance={attendance}
+          departments={departments}
+          onSaved={reloadData}
+        />
+      )}
+
       {/* Control Bar */}
+      {viewMode !== 'mark' && (
       <div className="bg-white dark:bg-neutral-900 p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xs flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           {viewMode === 'daily' ? (
@@ -409,6 +434,8 @@ export const AttendancePage: React.FC = () => {
           </div>
         )}
       </div>
+
+      )}
 
       {/* ------------------------------------------------------------- */}
       {/* 1. Daily View */}
