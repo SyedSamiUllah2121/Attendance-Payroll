@@ -175,7 +175,9 @@ export const UsersPage: React.FC = () => {
     const existing = form.id ? accounts.find((a) => a.id === form.id) : undefined;
 
     if (!name) return error('Name required', 'Enter the person’s name.');
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return error('Invalid email', 'Enter a valid email address.');
+    // Sign-in id: an email address or a plain username (no spaces)
+    if (!email || /\s/.test(email) || (email.includes('@') && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))
+      return error('Invalid sign-in', 'Enter a valid email address or a username without spaces.');
     if (accounts.some((a) => a.email.toLowerCase() === email && a.id !== form.id))
       return error('Email in use', `Another account already uses ${email}.`);
     if (!existing && form.password.length < 6)
@@ -545,9 +547,9 @@ export const UsersPage: React.FC = () => {
                 <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />
               </div>
               <div>
-                <label className={labelClass}>Email (sign-in) *</label>
+                <label className={labelClass}>Email or username (sign-in) *</label>
                 <input
-                  type="email"
+                  type="text"
                   value={form.email}
                   onChange={(e) => setForm({ ...form, email: e.target.value })}
                   className={`${inputClass} font-mono`}

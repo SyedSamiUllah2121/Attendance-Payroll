@@ -4,7 +4,12 @@ import { storageService } from '../services/storageService';
 import { defaultUserAccounts } from '../data/seedData';
 import { Permission, canOpenPage, normalizeRole, roleCan } from '../utils/permissions';
 
+/**
+ * Sessions live in sessionStorage, so closing the browser signs you out and the next visit
+ * starts at the login page. "Keep me signed in" also copies the session to localStorage.
+ */
 const SESSION_KEY = 'workpulse_active_user';
+const REMEMBER_KEY = 'workpulse_remember';
 
 /** Seeded accounts offered as one-click demo sign-ins (only while they exist and are active). */
 export const DEMO_ACCOUNT_IDS = defaultUserAccounts.map((a) => a.id);
@@ -29,7 +34,7 @@ export type LoginResult = { ok: true } | { ok: false; reason: 'invalid' | 'disab
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
-  login: (email: string, pass: string) => LoginResult;
+  login: (email: string, pass: string, remember?: boolean) => LoginResult;
   quickLogin: (accountId: string) => void;
   logout: () => void;
   /** Re-read the signed-in account (after its role or details change). */
@@ -46,7 +51,11 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 /** Restore the saved session, but only if that account still exists and is active. */
 const restoreSession = (): User | null => {
   if (typeof window === 'undefined') return null;
-  const saved = window.localStorage.getItem(SESSION_KEY);
+  const remembered = window.localStorage.getItem(REMEMBER_KEY) === '1';
+  if (!remembered) window.localStorage.removeItem(SESSION_KEY); // drop older always-on sessions
+  const saved =
+    window.sessionStorage.getItem(SESSION_KEY) ||
+    (remembered ? window.localStorage.getItem(SESSION_KEY) : null);
   if (!saved) return null;
   try {
     const parsed = JSON.parse(saved) as User;
@@ -62,14 +71,27 @@ const restoreSession = (): User | null => {
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(restoreSession);
+  const [remember, setRemember] = useState<boolean>(
+    () => typeof window !== 'undefined' && window.localStorage.getItem(REMEMBER_KEY) === '1'
+  );
 
   useEffect(() => {
     if (user) {
-      window.localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+      const json = JSON.stringify(user);
+      window.sessionStorage.setItem(SESSION_KEY, json);
+      if (remember) {
+        window.localStorage.setItem(SESSION_KEY, json);
+        window.localStorage.setItem(REMEMBER_KEY, '1');
+      } else {
+        window.localStorage.removeItem(SESSION_KEY);
+        window.localStorage.removeItem(REMEMBER_KEY);
+      }
     } else {
+      window.sessionStorage.removeItem(SESSION_KEY);
       window.localStorage.removeItem(SESSION_KEY);
+      window.localStorage.removeItem(REMEMBER_KEY);
     }
-  }, [user]);
+  }, [user, remember]);
 
   const signIn = (account: UserAccount) => {
     const accounts = storageService.getUsers().map((a) =>
@@ -79,7 +101,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(toSessionUser(account));
   };
 
-  const login = (email: string, pass: string): LoginResult => {
+  const login = (email: string, pass: string, keepSignedIn = false): LoginResult => {
     const account = storageService
       .getUsers()
       .find(
@@ -87,6 +109,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       );
     if (!account) return { ok: false, reason: 'invalid' };
     if (account.status !== 'Active') return { ok: false, reason: 'disabled' };
+    setRemember(keepSignedIn);
     signIn(account);
     return { ok: true };
   };
@@ -96,7 +119,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (account) signIn(account);
   };
 
-  const logout = () => setUser(null);
+  const logout = () => {
+    setRemember(false);
+    setUser(null);
+  };
 
   const refreshUser = useCallback(() => setUser(restoreSession()), []);
 

@@ -32,7 +32,9 @@ node node_modules/typescript/bin/tsc --noEmit
 - `App.tsx` falls back to the dashboard when `canOpen` fails.
 - Accounts are `UserAccount` records in storage, managed on the Users & Access page (`views/UsersPage.tsx`).
 - Legacy roles `admin` / `hr` are mapped by `normalizeRole`.
-- The session is re-validated against stored accounts on load.
+- The session is re-validated against stored accounts on load. It lives in `sessionStorage`, so a new browser session starts at the login page; "Keep me signed in" also copies it to `localStorage` (`workpulse_remember`).
+- `App.tsx` renders `<LoginPage />` until someone signs in, then `<SignedInApp key={user.id} />`, so every sign-in or account switch starts on the dashboard.
+- Seeded test accounts (username / password): `123`/`123` Head Manager, `attendance`/`123`, `payroll`/`123`, `assistant`/`123`, `employee`/`123`.
 - This is client-side only, not real security: passwords are plain text in `localStorage`.
 
 **Business logic in pure modules** (keep calculations here, not in views):

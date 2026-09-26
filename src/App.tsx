@@ -19,17 +19,20 @@ import { ReportsPage } from './views/ReportsPage';
 import { SettingsPage } from './views/SettingsPage';
 import { UsersPage } from './views/UsersPage';
 
+/** Login comes first. Keyed by user id so every sign-in / account switch starts on the Dashboard. */
 const AppContent: React.FC = () => {
-  const { user, isAuthenticated, canOpen } = useAuth();
+  const { user, isAuthenticated } = useAuth();
+  if (!isAuthenticated || !user) return <LoginPage />;
+  return <SignedInApp key={user.id} />;
+};
+
+const SignedInApp: React.FC = () => {
+  const { canOpen } = useAuth();
   const [currentPage, setCurrentPage] = useState<string>('dashboard');
 
   // Parameters for Payslip drill-down
   const [payslipEmployeeId, setPayslipEmployeeId] = useState<string | undefined>();
   const [payslipMonth, setPayslipMonth] = useState<string | undefined>();
-
-  if (!isAuthenticated || !user) {
-    return <LoginPage />;
-  }
 
   // Fall back to the dashboard if this account may not open the selected page
   const page = canOpen(currentPage) ? currentPage : 'dashboard';

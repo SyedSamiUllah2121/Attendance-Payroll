@@ -37,6 +37,7 @@ const STORAGE_KEYS = {
   ACTIVE_USER: 'workpulse_active_user',
   SEEDED_VERSION: 'workpulse_seeded_v3',
   LEAVE_POLICY_V2: 'workpulse_leave_policy_v2',
+  DEMO_LOGINS_V2: 'workpulse_demo_logins_v2',
 };
 
 class StorageService {
@@ -52,6 +53,35 @@ class StorageService {
       this.resetDemoData();
     }
     this.migrateAnnualLeavePolicy();
+    this.migrateDemoLogins();
+  }
+
+  /**
+   * One-time: move the seeded test accounts to short logins (password 123 for all).
+   * An account is only changed if it still has its original demo login.
+   */
+  private migrateDemoLogins(): void {
+    if (localStorage.getItem(STORAGE_KEYS.DEMO_LOGINS_V2)) return;
+    const logins: Record<string, { from: string[]; pass: string[]; to: string }> = {
+      'user-manager': { from: ['admin@workpulse.com', '123'], pass: ['admin123', '123'], to: '123' },
+      'user-attendance': { from: ['attendance@workpulse.com'], pass: ['attend123'], to: 'attendance' },
+      'user-payroll': { from: ['payroll@workpulse.com'], pass: ['payroll123'], to: 'payroll' },
+      'user-assistant': { from: ['hr@workpulse.com'], pass: ['hr123'], to: 'assistant' },
+      'user-employee': { from: ['ali.khan@workpulse.com'], pass: ['emp123'], to: 'employee' },
+    };
+    const users = localStorage.getItem(STORAGE_KEYS.USERS);
+    if (users) {
+      const list: UserAccount[] = JSON.parse(users);
+      this.saveUsers(
+        list.map((u) => {
+          const l = logins[u.id];
+          return l && l.from.includes(u.email) && l.pass.includes(u.password)
+            ? { ...u, email: l.to, password: '123' }
+            : u;
+        })
+      );
+    }
+    localStorage.setItem(STORAGE_KEYS.DEMO_LOGINS_V2, '1');
   }
 
   // One-time move from the old 3 days/month default to 2.5 days/month (30 days/year).
