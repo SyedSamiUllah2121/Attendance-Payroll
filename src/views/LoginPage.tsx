@@ -21,6 +21,7 @@ import { getDemoAccounts, useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { Role } from '../types';
 import { ROLE_LABELS } from '../utils/permissions';
+import { FitToScreen } from '../components/common/FitToScreen';
 
 const ROLE_ICONS: Record<Role, React.ElementType> = {
   manager: ShieldCheck,
@@ -40,7 +41,7 @@ const ProductShowcase: React.FC = () => {
   const circumference = 2 * Math.PI * 34;
 
   return (
-    <div className="relative h-full w-full overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800 p-8 xl:p-10 flex flex-col">
+    <div className="relative h-full w-full overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800">
       {/* Background texture */}
       <div
         className="absolute inset-0 opacity-[0.15]"
@@ -52,6 +53,7 @@ const ProductShowcase: React.FC = () => {
       <div className="absolute -top-24 -right-24 w-96 h-96 rounded-full bg-violet-400/30 blur-3xl" />
       <div className="absolute -bottom-32 -left-20 w-[28rem] h-[28rem] rounded-full bg-sky-400/20 blur-3xl" />
 
+      <FitToScreen className="relative z-10 h-full" innerClassName="p-8 xl:p-10 flex flex-col justify-between gap-6">
       {/* Headline */}
       <div className="relative z-10 max-w-md animate-fade-up">
         <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 border border-white/20 text-[11px] font-semibold text-indigo-100 backdrop-blur">
@@ -66,7 +68,7 @@ const ProductShowcase: React.FC = () => {
       </div>
 
       {/* Floating product cards */}
-      <div className="relative z-10 flex-1 min-h-[300px] mt-6">
+      <div className="relative z-10 h-[380px]">
         {/* Attendance donut */}
         <div className="absolute left-0 top-4 w-64 rounded-2xl bg-white/95 dark:bg-neutral-900/95 p-5 shadow-2xl shadow-indigo-950/40 animate-float">
           <p className="text-xs font-semibold text-neutral-500">Today's attendance</p>
@@ -171,7 +173,7 @@ const ProductShowcase: React.FC = () => {
       </div>
 
       {/* Footer stats */}
-      <div className="relative z-10 mt-4 grid grid-cols-3 gap-4 border-t border-white/15 pt-4 [@media(max-height:760px)]:hidden">
+      <div className="relative z-10 grid grid-cols-3 gap-4 border-t border-white/15 pt-5">
         {[
           ['5 roles', 'Access control'],
           ['2.5 days', 'Leave per month'],
@@ -183,6 +185,7 @@ const ProductShowcase: React.FC = () => {
           </div>
         ))}
       </div>
+      </FitToScreen>
     </div>
   );
 };
@@ -238,7 +241,7 @@ export const LoginPage: React.FC = () => {
   return (
     <div className="min-h-screen lg:h-dvh lg:overflow-hidden bg-white dark:bg-neutral-950 grid lg:grid-cols-2">
       {/* Sign-in form */}
-      <div className="flex flex-col px-6 sm:px-12 py-6 lg:h-dvh lg:overflow-y-auto">
+      <FitToScreen className="lg:h-dvh" innerClassName="flex flex-col px-6 sm:px-12 py-6">
         <div className="flex items-center gap-2.5 animate-fade-up">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-lg shadow-indigo-600/30">
             <Building2 className="w-5 h-5" />
@@ -383,7 +386,7 @@ export const LoginPage: React.FC = () => {
         </div>
 
         <p className="text-[11px] text-neutral-400">© {new Date().getFullYear()} WorkPulse · Attendance &amp; Payroll Management</p>
-      </div>
+      </FitToScreen>
 
       {/* Illustration (large screens) */}
       <div className="hidden lg:block p-3 h-dvh">
