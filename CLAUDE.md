@@ -17,6 +17,21 @@ node node_modules/typescript/bin/tsc --noEmit
 
 `GEMINI_API_KEY` in `.env.local` is only needed for the AI summary on the Analytics page (`app/api/ai-summary/route.ts`); everything else works without it.
 
+## GitHub repos
+
+The user refers to these by number ("push to repo 2"). Both are git remotes of this checkout; work happens on `main`.
+
+| Name | Remote | URL | Notes |
+|---|---|---|---|
+| Repo 1 | `origin` | https://github.com/SyedSamiUllah2121/Attendance-Payroll | Connected to Vercel: pushing `main` deploys https://attendance-payroll-five.vercel.app |
+| Repo 2 | `attendanceplus` | https://github.com/Apexcreative025/AttendancePlus | Mirror; not the live site |
+
+- Push to repo 1: `git push origin main`
+- Push to repo 2: `git push attendanceplus main`
+- If a remote is missing, add it: `git remote add attendanceplus https://github.com/Apexcreative025/AttendancePlus.git`
+- Run a production build (`next build`) before pushing to repo 1, because a failed build breaks the live deploy. Stop the dev server first, since both use `.next`.
+- Pushes may need the sandbox disabled, because network access to github.com is blocked inside it.
+
 ## Architecture
 
 **A client-only SPA inside Next.js.** `app/page.tsx` loads `src/App.tsx` with `next/dynamic(..., { ssr: false })` because all state lives in `localStorage` (SSR caused hydration mismatches). There is no backend or database: the only server code is the Gemini API route. React components live in `src/views/`, not `src/pages/` — a `src/pages` folder would be picked up by Next's Pages Router and break the build.
