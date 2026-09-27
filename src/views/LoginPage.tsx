@@ -41,7 +41,7 @@ const ProductShowcase: React.FC = () => {
   const circumference = 2 * Math.PI * 34;
 
   return (
-    <div className="relative h-full w-full overflow-hidden rounded-l-[2rem] bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800">
+    <div className="relative h-full w-full overflow-hidden bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800">
       {/* Background texture */}
       <div
         className="absolute inset-0 opacity-[0.15]"
