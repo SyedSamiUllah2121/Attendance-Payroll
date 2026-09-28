@@ -1,5 +1,8 @@
-import { AttendanceStatus, Holiday, Shift } from '../types';
+import { AttendanceStatus, Holiday, LeaveRequest, Shift } from '../types';
 import { getDay, parse, differenceInMinutes } from 'date-fns';
+import { todayStr } from './dateUtils';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Calculates attendance status based on shift configuration and check-in / check-out times.
@@ -8,7 +11,7 @@ export function evaluateAttendanceStatus(
   checkInStr: string | undefined,
   checkOutStr: string | undefined,
   shift: Shift,
-  dateStr: string = new Date().toISOString().slice(0, 10),
+  dateStr: string = todayStr(),
   holidays: Holiday[] = [],
   hasApprovedLeave: boolean = false
 ): {
@@ -65,8 +68,15 @@ export function evaluateAttendanceStatus(
   // Parse shift times
   const baseDate = '2026-01-01 ';
   const shiftStart = parse(baseDate + shift.startTime, 'yyyy-MM-dd HH:mm', new Date());
-  const shiftEnd = parse(baseDate + shift.endTime, 'yyyy-MM-dd HH:mm', new Date());
-  const checkIn = parse(baseDate + checkInStr.slice(0, 5), 'yyyy-MM-dd HH:mm', new Date());
+  let shiftEnd = parse(baseDate + shift.endTime, 'yyyy-MM-dd HH:mm', new Date());
+  // Overnight shift (e.g. 22:00 - 06:00): the end falls on the next day.
+  const isOvernight = shiftEnd <= shiftStart;
+  if (isOvernight) shiftEnd = new Date(shiftEnd.getTime() + DAY_MS);
+  let checkIn = parse(baseDate + checkInStr.slice(0, 5), 'yyyy-MM-dd HH:mm', new Date());
+  // On an overnight shift, a (late) check-in after midnight belongs to the next day.
+  if (isOvernight && shiftStart.getTime() - checkIn.getTime() > 12 * 60 * 60 * 1000) {
+    checkIn = new Date(checkIn.getTime() + DAY_MS);
+  }
 
   const graceEnd = new Date(shiftStart.getTime() + shift.gracePeriodMinutes * 60 * 1000);
   const isLate = checkIn > graceEnd;
@@ -76,7 +86,9 @@ export function evaluateAttendanceStatus(
   let isEarlyDeparture = false;
 
   if (checkOutStr) {
-    const checkOut = parse(baseDate + checkOutStr.slice(0, 5), 'yyyy-MM-dd HH:mm', new Date());
+    let checkOut = parse(baseDate + checkOutStr.slice(0, 5), 'yyyy-MM-dd HH:mm', new Date());
+    // Checked out after midnight.
+    if (checkOut < checkIn) checkOut = new Date(checkOut.getTime() + DAY_MS);
     const rawElapsed = differenceInMinutes(checkOut, checkIn);
     workedMinutes = Math.max(0, rawElapsed - shift.breakDurationMinutes);
 
@@ -177,5 +189,42 @@ export function calculateEffectiveLeaveDays(
     curr.setDate(curr.getDate() + 1);
   }
 
-  return Math.max(days, 1);
+  return days;
+}
+
+/** What a day with no saved attendance record means for an employee. */
+export type UnmarkedDayStatus = 'Holiday' | 'Weekend' | 'On Leave' | 'Absent' | 'Pending' | 'Upcoming' | 'Not Joined';
+
+/** True when the employee has approved leave covering dateStr. */
+export function hasApprovedLeaveOn(employeeId: string, dateStr: string, leaves: LeaveRequest[]): boolean {
+  return leaves.some(
+    (l) =>
+      l.employeeId === employeeId &&
+      l.status === 'Approved' &&
+      l.fromDate <= dateStr &&
+      l.toDate >= dateStr
+  );
+}
+
+/**
+ * Status of a day that has no attendance record: a holiday, off day, approved leave,
+ * or, on a past working day, Absent. Today is Pending (not checked in yet) and later days Upcoming.
+ */
+export function resolveUnmarkedDay(
+  employee: { id: string; joiningDate?: string },
+  shift: Shift | undefined,
+  dateStr: string,
+  holidays: Holiday[],
+  leaves: LeaveRequest[],
+  today: string = todayStr()
+): UnmarkedDayStatus {
+  if (employee.joiningDate && dateStr < employee.joiningDate) return 'Not Joined';
+  if (holidays.some((h) => h.date === dateStr)) return 'Holiday';
+  const dow = new Date(dateStr + 'T00:00:00').getDay();
+  const workingDays = shift?.workingDays ?? [1, 2, 3, 4, 5];
+  if (!workingDays.includes(dow)) return 'Weekend';
+  if (hasApprovedLeaveOn(employee.id, dateStr, leaves)) return 'On Leave';
+  if (dateStr > today) return 'Upcoming';
+  if (dateStr === today) return 'Pending';
+  return 'Absent';
 }

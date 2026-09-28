@@ -7,6 +7,7 @@ import { useNotification } from '../../context/NotificationContext';
 import { evaluateAttendanceStatus } from '../../utils/attendanceEngine';
 import { TimeInput } from '../common/TimeInput';
 import { Modal } from '../common/Modal';
+import { todayStr } from '../../utils/dateUtils';
 
 type MarkStatus = AttendanceStatus | '';
 
@@ -51,7 +52,6 @@ const STATUS_LABEL: Record<string, string> = { 'On Leave': 'Leave' };
 const TIMED: MarkStatus[] = ['Present', 'Late', 'Half Day'];
 
 const pad = (n: number) => String(n).padStart(2, '0');
-const localDate = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
 const inputClass =
   'px-2 py-1 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-md text-neutral-900 dark:text-neutral-100';
@@ -81,7 +81,7 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
   const { user } = useAuth();
   const { success, warning } = useNotification();
 
-  const today = localDate(new Date());
+  const today = todayStr();
   const [date, setDate] = useState(today);
   const [dept, setDept] = useState('');
   const [search, setSearch] = useState('');
@@ -110,13 +110,15 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
     activeEmployees.forEach((emp) => {
       const rec = existingFor(emp.id);
       if (rec) {
+        // System-filled days (auto Absent / Weekend / Holiday / Leave) show as-is but aren't
+        // re-saved unless someone changes them.
         next[emp.id] = {
           status: rec.status,
           checkIn: rec.checkIn?.slice(0, 5) || '',
           checkOut: rec.checkOut?.slice(0, 5) || '',
-          notes: rec.notes || '',
+          notes: rec.autoMarked ? '' : rec.notes || '',
           dirty: false,
-          auto: false,
+          auto: Boolean(rec.autoMarked),
         };
         return;
       }
@@ -200,6 +202,8 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
     storageService.saveAttendance(
       storageService.getAttendance().filter((r) => !(r.date === date && r.status === 'Holiday'))
     );
+    // Re-fill the day (Absent / Weekend / Leave) now that it is a normal day again.
+    storageService.syncAttendance();
     setHolidays(updated);
     success('Holiday Removed', `${holiday.name} removed from ${date}.`);
     onSaved();
@@ -307,7 +311,13 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
   const handleSave = () => {
     const invalid = saveIds.filter((id) => {
       const r = rows[id];
-      return TIMED.includes(r.status) && (!r.checkIn || (r.checkOut && r.checkOut <= r.checkIn));
+      if (!TIMED.includes(r.status)) return false;
+      if (!r.checkIn) return true;
+      const emp = employees.find((e) => e.id === id);
+      const shift = emp ? shiftOf(emp) : shifts[0];
+      // An overnight shift (e.g. 22:00 - 06:00) legitimately checks out "before" check-in.
+      const overnight = shift && shift.endTime <= shift.startTime;
+      return Boolean(r.checkOut && r.checkOut === r.checkIn) || Boolean(!overnight && r.checkOut && r.checkOut < r.checkIn);
     });
     if (invalid.length) {
       const names = invalid.map((id) => employees.find((e) => e.id === id)?.name).join(', ');
@@ -337,6 +347,7 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
         isEarlyDeparture: ev?.isEarlyDeparture ?? false,
         notes: r.notes || undefined,
         modifiedBy: user?.name,
+        autoMarked: undefined,
       };
       if (idx >= 0) list[idx] = record;
       else list.push(record);

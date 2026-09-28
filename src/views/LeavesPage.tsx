@@ -10,14 +10,14 @@ import {
   Clock,
   User,
 } from 'lucide-react';
-import { LeaveRequest, LeaveType, LeaveStatus, Employee, Holiday } from '../types';
+import { LeaveRequest, LeaveType, Employee, Holiday, Shift } from '../types';
 import { storageService } from '../services/storageService';
 import { useAuth } from '../context/AuthContext';
 import { useSettings } from '../context/SettingsContext';
 import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
-import { differenceInBusinessDays, parseISO, addDays } from 'date-fns';
+import { addDaysStr, parseDateStr, todayStr } from '../utils/dateUtils';
 import { computeAnnualLeave, getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
 import { reviewLeave } from '../services/approvalService';
 
@@ -27,11 +27,12 @@ export const LeavesPage: React.FC = () => {
   const canCreateForOthers = can('leaves.create');
   const canApprove = can('leaves.approve');
   const { settings } = useSettings();
-  const { success, warning, error } = useNotification();
+  const { success, error } = useNotification();
 
   const [leaves, setLeaves] = useState<LeaveRequest[]>(() => storageService.getLeaves());
   const [employees] = useState<Employee[]>(() => storageService.getEmployees());
   const [holidays] = useState<Holiday[]>(() => storageService.getHolidays());
+  const [shifts] = useState<Shift[]>(() => storageService.getShifts());
 
   // Filter state
   const [statusFilter, setStatusFilter] = useState<string>('');
@@ -41,8 +42,7 @@ export const LeavesPage: React.FC = () => {
   // Apply modal
   const [isApplyModalOpen, setIsApplyModalOpen] = useState(false);
   const blankForm = (employeeId: string) => {
-    const d = new Date();
-    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const today = todayStr();
     return {
       employeeId,
       leaveType: 'Annual' as LeaveType,
@@ -56,7 +56,7 @@ export const LeavesPage: React.FC = () => {
       approveNow: false,
     };
   };
-  const [applyForm, setApplyForm] = useState(() => blankForm(user?.employeeId || 'EMP-001'));
+  const [applyForm, setApplyForm] = useState(() => blankForm(user?.employeeId || ''));
 
   // Review Reject modal
   const [rejectingLeave, setRejectingLeave] = useState<LeaveRequest | null>(null);
@@ -66,36 +66,8 @@ export const LeavesPage: React.FC = () => {
     setLeaves(storageService.getLeaves());
   };
 
-  const currentEmpId = user?.employeeId || 'EMP-001';
-
-  // Calculate leave days excluding weekends and holidays
-  const calculateWorkingDays = (from: string, to: string, isHalf: boolean): number => {
-    if (isHalf) return 0.5;
-    if (!from || !to || from > to) return 0;
-
-    let count = 0;
-    let curr = new Date(from + 'T00:00:00');
-    const end = new Date(to + 'T00:00:00');
-
-    while (curr <= end) {
-      const dow = curr.getDay();
-      const isWeekend = dow === 0 || dow === 6;
-      const dateStr = curr.toISOString().slice(0, 10);
-      const isHoliday = holidays.some((h) => h.date === dateStr);
-
-      if (!isWeekend && !isHoliday) {
-        count++;
-      }
-      curr = addDays(curr, 1);
-    }
-    return count;
-  };
-
-  const currentDaysCount = calculateWorkingDays(
-    applyForm.fromDate,
-    applyForm.toDate,
-    applyForm.isHalfDay
-  );
+  // No employee link means no own leave (never fall back to someone else's records).
+  const currentEmpId = user?.employeeId || '';
 
   // Whose balances to show: the employee picked in the form when staff enter a request for
   // someone else, otherwise the signed-in user.
@@ -103,8 +75,41 @@ export const LeavesPage: React.FC = () => {
   const balanceEmpId = enteringForOthers ? applyForm.employeeId : currentEmpId;
   const showOwnBalances = isEmployee || !!user?.employeeId;
 
-  // Quotas
-  const userLeaves = leaves.filter((l) => l.employeeId === balanceEmpId && l.status === 'Approved');
+  // Leave days: the employee's working days (per their shift), skipping holidays.
+  const calculateWorkingDays = (from: string, to: string, isHalf: boolean, empId: string): number => {
+    if (!from || !to || from > to) return 0;
+    const emp = employees.find((e) => e.id === empId);
+    const shift = shifts.find((s) => s.id === emp?.shiftId) || shifts[0];
+    const workingDays = shift?.workingDays ?? [1, 2, 3, 4, 5];
+    const holidayDates = new Set(holidays.map((h) => h.date));
+    let count = 0;
+    for (let dateStr = from; dateStr <= to; dateStr = addDaysStr(dateStr, 1)) {
+      if (workingDays.includes(parseDateStr(dateStr).getDay()) && !holidayDates.has(dateStr)) count++;
+    }
+    // A half day is one session of a single working day.
+    return isHalf ? Math.min(count, 1) * 0.5 : count;
+  };
+
+  const currentDaysCount = calculateWorkingDays(
+    applyForm.fromDate,
+    applyForm.isHalfDay ? applyForm.fromDate : applyForm.toDate,
+    applyForm.isHalfDay,
+    balanceEmpId
+  );
+
+  // Quotas (this calendar year)
+  const thisYear = new Date().getFullYear();
+  const inThisYear = (l: LeaveRequest) => l.fromDate.startsWith(String(thisYear));
+  const userLeaves = leaves.filter(
+    (l) => l.employeeId === balanceEmpId && l.status === 'Approved' && inThisYear(l)
+  );
+  // Pending requests already claim part of the balance.
+  const pendingOf = (type: LeaveType) =>
+    leaves
+      .filter(
+        (l) => l.employeeId === balanceEmpId && l.status === 'Pending' && l.leaveType === type && inThisYear(l)
+      )
+      .reduce((acc, l) => acc + l.daysCount, 0);
   const usedAnnual = userLeaves
     .filter((l) => l.leaveType === 'Annual')
     .reduce((acc, l) => acc + l.daysCount, 0);
@@ -118,7 +123,7 @@ export const LeavesPage: React.FC = () => {
   // Annual leave is earned monthly; see the Annual Leave module.
   const currentEmp = employees.find((e) => e.id === balanceEmpId);
   const annualSummary = currentEmp
-    ? computeAnnualLeave(currentEmp, leaves, getAnnualLeavePolicy(settings), new Date().getFullYear())
+    ? computeAnnualLeave(currentEmp, leaves, getAnnualLeavePolicy(settings), thisYear)
     : undefined;
   const annualQuota = annualSummary
     ? annualSummary.carriedForward + annualSummary.accrued
@@ -131,12 +136,25 @@ export const LeavesPage: React.FC = () => {
     : Math.max(0, annualQuota - usedAnnual);
   const remSick = Math.max(0, sickQuota - usedSick);
   const remCasual = Math.max(0, casualQuota - usedCasual);
+  const availAnnual = annualSummary ? annualSummary.available : remAnnual - pendingOf('Annual');
+  const availSick = remSick - pendingOf('Sick');
+  const availCasual = remCasual - pendingOf('Casual');
 
   // Handle Apply Form Submit
   const handleApplyLeave = (e: React.FormEvent) => {
     e.preventDefault();
+    const employeeId = enteringForOthers ? applyForm.employeeId : currentEmpId;
+    const toDate = applyForm.isHalfDay ? applyForm.fromDate : applyForm.toDate;
+    if (!employeeId) {
+      error('No Employee', 'Your account is not linked to an employee record.');
+      return;
+    }
+    if (!applyForm.fromDate || !toDate || toDate < applyForm.fromDate) {
+      error('Invalid Dates', 'The end date cannot be before the start date.');
+      return;
+    }
     if (currentDaysCount <= 0) {
-      error('Invalid Dates', 'Please select at least 1 working day for leave.');
+      error('Invalid Dates', 'The selected dates are all off days or holidays for this employee.');
       return;
     }
 
@@ -145,21 +163,49 @@ export const LeavesPage: React.FC = () => {
       return;
     }
 
-    // Balance check
-    if (applyForm.leaveType === 'Annual' && currentDaysCount > remAnnual) {
-      warning('Quota Exceeded', `You only have ${remAnnual} Annual Leave days remaining.`);
-    } else if (applyForm.leaveType === 'Casual' && currentDaysCount > remCasual) {
-      warning('Quota Exceeded', `You only have ${remCasual} Casual Leave days remaining.`);
-    } else if (applyForm.leaveType === 'Sick' && currentDaysCount > remSick) {
-      warning('Quota Exceeded', `You only have ${remSick} Sick Leave days remaining.`);
+    const overlap = storageService
+      .getLeaves()
+      .find(
+        (l) =>
+          l.employeeId === employeeId &&
+          (l.status === 'Pending' || l.status === 'Approved') &&
+          l.fromDate <= toDate &&
+          l.toDate >= applyForm.fromDate
+      );
+    if (overlap) {
+      error(
+        'Overlapping Leave',
+        `There is already a ${overlap.status.toLowerCase()} ${overlap.leaveType} leave from ${overlap.fromDate} to ${overlap.toDate}.`
+      );
+      return;
+    }
+
+    // Balance check: paid leave cannot exceed what is left after pending requests.
+    // Unpaid leave has no quota.
+    const available =
+      applyForm.leaveType === 'Annual'
+        ? availAnnual
+        : applyForm.leaveType === 'Casual'
+        ? availCasual
+        : applyForm.leaveType === 'Sick'
+        ? availSick
+        : Infinity;
+    if (currentDaysCount > available) {
+      const left = Math.max(0, available);
+      error(
+        'Quota Exceeded',
+        `Only ${left} ${applyForm.leaveType} Leave day${left === 1 ? '' : 's'} available (after pending requests). Request fewer days or use Unpaid Leave.`
+      );
+      return;
     }
 
     const newLeave: LeaveRequest = {
       id: `lv-${Date.now()}`,
-      employeeId: enteringForOthers ? applyForm.employeeId : currentEmpId,
+      employeeId,
       leaveType: applyForm.leaveType,
       fromDate: applyForm.fromDate,
-      toDate: applyForm.toDate,
+      toDate,
+      ...(applyForm.isHalfDay ? { isHalfDay: true } : {}),
       daysCount: currentDaysCount,
       reason: applyForm.reason,
       status: 'Pending',
@@ -191,7 +237,8 @@ export const LeavesPage: React.FC = () => {
   // Handle Review Action (Approve / Reject)
   const handleReview = (leave: LeaveRequest, action: 'Approved' | 'Rejected', comment = '') => {
     reviewLeave(leave, action, user?.name || 'Head Manager', comment);
-    success(`Leave ${action}`, `Request for ${leave.employeeId} marked as ${action}.`);
+    const empName = employees.find((e) => e.id === leave.employeeId)?.name || leave.employeeId;
+    success(`Leave ${action}`, `Request for ${empName} marked as ${action}.`);
     reloadLeaves();
   };
 
@@ -305,7 +352,7 @@ export const LeavesPage: React.FC = () => {
             </span>
             <span className="text-xs text-neutral-400">days taken</span>
           </div>
-          <p className="text-[11px] text-neutral-400 mt-3">Refreshes Jan 1, 2027</p>
+          <p className="text-[11px] text-neutral-400 mt-3">Refreshes Jan 1, {thisYear + 1}</p>
         </div>
       </div>
       )}
@@ -343,11 +390,13 @@ export const LeavesPage: React.FC = () => {
               className="px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-700 dark:text-neutral-300"
             >
               <option value="">All Departments</option>
-              <option value="Engineering">Engineering</option>
-              <option value="Human Resources">Human Resources</option>
-              <option value="Finance">Finance</option>
-              <option value="Sales">Sales</option>
-              <option value="Operations">Operations</option>
+              {Array.from(new Set(employees.map((e) => e.department)))
+                .sort()
+                .map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
             </select>
           )}
 
@@ -420,6 +469,9 @@ export const LeavesPage: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-4 font-mono text-neutral-600 dark:text-neutral-300">
                         {lv.fromDate} {lv.fromDate !== lv.toDate ? `to ${lv.toDate}` : ''}
+                        {lv.isHalfDay && (
+                          <span className="block text-[11px] font-sans text-neutral-400">Half day</span>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 font-mono font-bold tabular-nums text-neutral-900 dark:text-neutral-100">
                         {lv.daysCount}d
@@ -458,7 +510,7 @@ export const LeavesPage: React.FC = () => {
                               <button
                                 onClick={() => {
                                   setRejectingLeave(lv);
-                                  setRejectReason('Insufficient coverage during sprint delivery');
+                                  setRejectReason('');
                                 }}
                                 className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[11px] font-semibold flex items-center gap-1 shadow-xs"
                               >
@@ -563,7 +615,14 @@ export const LeavesPage: React.FC = () => {
                   type="date"
                   required
                   value={applyForm.fromDate}
-                  onChange={(e) => setApplyForm({ ...applyForm, fromDate: e.target.value })}
+                  onChange={(e) =>
+                    setApplyForm({
+                      ...applyForm,
+                      fromDate: e.target.value,
+                      // Keep the range valid when the start moves past the end.
+                      toDate: applyForm.toDate < e.target.value ? e.target.value : applyForm.toDate,
+                    })
+                  }
                   className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
                 />
               </div>
@@ -575,9 +634,11 @@ export const LeavesPage: React.FC = () => {
                 <input
                   type="date"
                   required
-                  value={applyForm.toDate}
+                  disabled={applyForm.isHalfDay}
+                  min={applyForm.fromDate}
+                  value={applyForm.isHalfDay ? applyForm.fromDate : applyForm.toDate}
                   onChange={(e) => setApplyForm({ ...applyForm, toDate: e.target.value })}
-                  className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
+                  className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono disabled:opacity-60"
                 />
               </div>
             </div>
@@ -662,7 +723,7 @@ export const LeavesPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsApplyModalOpen(false)}
-                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200 transition-colors"
+                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors"
               >
                 Cancel
               </button>
@@ -708,7 +769,7 @@ export const LeavesPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setRejectingLeave(null)}
-                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200"
+                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700"
               >
                 Cancel
               </button>

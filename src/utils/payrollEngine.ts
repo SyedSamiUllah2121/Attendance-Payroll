@@ -65,6 +65,22 @@ export interface PayrollCalculationResult {
   netSalary: number;
 }
 
+/** A rate that may be saved as a percentage (5) or a fraction (0.05); returned as a fraction. */
+export function toRateFraction(value: number | undefined, fallbackPercent: number): number {
+  const v = typeof value === 'number' && isFinite(value) && value >= 0 ? value : fallbackPercent;
+  return v >= 1 ? v / 100 : v;
+}
+
+/** Monthly provident fund rate (fraction of basic) from settings. */
+export function getProvidentFundRate(settings: AppSettings): number {
+  return toRateFraction(settings.payroll.providentFundRate ?? settings.payroll.providentFundPercentage, 5);
+}
+
+/** Loss-of-pay days: absences, unpaid leave and half of each half day. */
+export function getLopDays(absentDays: number, unpaidLeaveDays: number, halfDays: number): number {
+  return (absentDays || 0) + (unpaidLeaveDays || 0) + (halfDays || 0) * 0.5;
+}
+
 /**
  * Executes standard payroll calculations according to WorkPulse business rules.
  */
@@ -85,75 +101,82 @@ export function calculateSalary(input: PayrollCalculationInput): PayrollCalculat
 
   const validWorkingDays = workingDaysInMonth > 0 ? workingDaysInMonth : 22;
   const validShiftHours = shiftHoursPerDay > 0 ? shiftHoursPerDay : 8;
+  const pay = settings.payroll;
+  const att = settings.attendance;
 
-  // Earnings
-  const hra = (basicSalary * (settings.payroll.hraPercentage || 40)) / 100;
-  const medical = (basicSalary * (settings.payroll.medicalPercentage || 10)) / 100;
-  const conveyance = settings.payroll.conveyanceFixed || 5000;
-  const grossSalary = basicSalary + hra + medical + conveyance;
+  // Earnings (a setting of 0 is respected; only missing values fall back to defaults)
+  const hra = round((basicSalary * (pay.hraPercentage ?? 40)) / 100);
+  const medical = round((basicSalary * (pay.medicalPercentage ?? 10)) / 100);
+  const conveyance = round(pay.conveyanceFixed ?? 5000);
+  const grossSalary = round(basicSalary + hra + medical + conveyance);
 
   // Per day and hourly rates
   const perDaySalary = grossSalary / validWorkingDays;
   const hourlyRate = perDaySalary / validShiftHours;
 
   // Overtime pay (1.5x hourly rate default)
-  const otMultiplier = settings.attendance.otMultiplier || 1.5;
-  const overtimePay = Math.max(0, overtimeHours * hourlyRate * otMultiplier);
+  const otMultiplier = att.overtimeMultiplier ?? att.otMultiplier ?? 1.5;
+  const overtimePay = round(Math.max(0, (overtimeHours || 0) * hourlyRate * otMultiplier));
 
-  // LOP Deduction: (Absent + Unpaid Leave + Half Day * 0.5) * Per Day
-  const lopDays = absentDays + unpaidLeaveDays + halfDays * 0.5;
-  const lopDeduction = lopDays * perDaySalary;
+  // LOP Deduction: (Absent + Unpaid Leave + Half Day * 0.5) * Per Day, never more than gross
+  const lopDays = getLopDays(absentDays, unpaidLeaveDays, halfDays);
+  const lopDeduction = round(Math.min(grossSalary, Math.max(0, lopDays * perDaySalary)));
 
-  // Late Penalty: floor(lateCount / 3) * 0.5 * Per Day
-  const lateEvery = settings.attendance.latePenaltyEveryCount || 3;
-  const latePenaltyDays = Math.floor(lateCount / lateEvery) * (settings.attendance.latePenaltyHalfDays || 0.5);
-  const latePenaltyDeduction = latePenaltyDays * perDaySalary;
+  // Late Penalty: floor(lateCount / every) * halfDays * Per Day, capped at what is left of gross
+  const lateEvery = att.latePenaltyEveryCount > 0 ? att.latePenaltyEveryCount : 3;
+  const latePenaltyDays =
+    att.latePenaltyEnabled === false
+      ? 0
+      : Math.floor((lateCount || 0) / lateEvery) * (att.latePenaltyHalfDays ?? 0.5);
+  const latePenaltyDeduction = round(
+    Math.min(grossSalary - lopDeduction, Math.max(0, latePenaltyDays * perDaySalary))
+  );
 
   // Annual Taxable Income & Monthly Tax
   const annualGross = grossSalary * 12;
-  const annualTax = calculateAnnualTax(annualGross, settings.payroll.taxSlabs);
-  const incomeTax = annualTax / 12;
+  const annualTax = calculateAnnualTax(annualGross, pay.taxSlabs || []);
+  const incomeTax = round(annualTax / 12);
 
-  // Provident Fund: 5% of basic
-  const pfPercent = settings.payroll.providentFundPercentage || 5;
-  const providentFund = (basicSalary * pfPercent) / 100;
+  // Provident Fund: % of basic
+  const providentFund = round(basicSalary * getProvidentFundRate(settings));
 
   // Social Security: Fixed e.g. 370
-  const socialSecurity = settings.payroll.socialSecurityFixed || 370;
+  const socialSecurity = round(pay.socialSecurityFixed ?? 370);
 
-  // Summaries
-  const totalEarnings = grossSalary + overtimePay + bonus;
+  // Summaries (built from rounded components so the parts always add up to the totals)
+  const totalEarnings = round(grossSalary + overtimePay + bonus);
   const otherDeductions = 0;
-  const totalDeductions =
-    incomeTax +
-    providentFund +
-    socialSecurity +
-    lopDeduction +
-    latePenaltyDeduction +
-    loanInstallment +
-    otherDeductions;
+  const deductionsBeforeLoan = round(
+    incomeTax + providentFund + socialSecurity + lopDeduction + latePenaltyDeduction + otherDeductions
+  );
 
-  const netSalary = Math.max(0, totalEarnings - totalDeductions);
+  // A loan installment can only be recovered from what is left of the salary
+  const loanRecovered = round(
+    Math.min(Math.max(0, loanInstallment), Math.max(0, totalEarnings - deductionsBeforeLoan))
+  );
+  const totalDeductions = round(deductionsBeforeLoan + loanRecovered);
+
+  const netSalary = round(Math.max(0, totalEarnings - totalDeductions));
 
   return {
-    hra: round(hra),
-    medical: round(medical),
-    conveyance: round(conveyance),
-    grossSalary: round(grossSalary),
+    hra,
+    medical,
+    conveyance,
+    grossSalary,
     perDaySalary: round(perDaySalary),
     hourlyRate: round(hourlyRate),
-    overtimePay: round(overtimePay),
+    overtimePay,
     bonus: round(bonus),
-    totalEarnings: round(totalEarnings),
-    incomeTax: round(incomeTax),
-    providentFund: round(providentFund),
-    socialSecurity: round(socialSecurity),
-    lopDeduction: round(lopDeduction),
-    latePenaltyDeduction: round(latePenaltyDeduction),
-    loanInstallment: round(loanInstallment),
-    otherDeductions: round(otherDeductions),
-    totalDeductions: round(totalDeductions),
-    netSalary: round(netSalary),
+    totalEarnings,
+    incomeTax,
+    providentFund,
+    socialSecurity,
+    lopDeduction,
+    latePenaltyDeduction,
+    loanInstallment: loanRecovered,
+    otherDeductions,
+    totalDeductions,
+    netSalary,
   };
 }
 

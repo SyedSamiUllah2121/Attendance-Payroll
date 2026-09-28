@@ -16,14 +16,54 @@ import {
   FileCheck,
   UserCheck,
 } from 'lucide-react';
-import { AttendanceRecord, AttendanceStatus, Employee, RegularizationRequest, Shift } from '../types';
+import {
+  AttendanceRecord,
+  AttendanceStatus,
+  Employee,
+  Holiday,
+  LeaveRequest,
+  RegularizationRequest,
+  Shift,
+} from '../types';
 import { storageService } from '../services/storageService';
 import { useSettings } from '../context/SettingsContext';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
-import { evaluateAttendanceStatus } from '../utils/attendanceEngine';
+import { evaluateAttendanceStatus, resolveUnmarkedDay, UnmarkedDayStatus } from '../utils/attendanceEngine';
+import { addDaysStr, currentMonthStr, todayStr } from '../utils/dateUtils';
+
+const TIMED_STATUSES: AttendanceStatus[] = ['Present', 'Late', 'Half Day'];
+
+/** Label for a day with no saved record. */
+const UNMARKED_LABEL: Record<UnmarkedDayStatus, string> = {
+  Holiday: 'Holiday',
+  Weekend: 'Weekend',
+  'On Leave': 'On Leave',
+  Absent: 'Absent',
+  Pending: 'Not Marked',
+  Upcoming: 'Upcoming',
+  'Not Joined': 'Not Joined',
+};
+
+/** Evaluate times against the shift, ignoring weekend/holiday so work on an off-day still counts. */
+const evaluateTimes = (checkIn: string, checkOut: string, shift: Shift, date: string) =>
+  evaluateAttendanceStatus(
+    checkIn || undefined,
+    checkOut || undefined,
+    { ...shift, workingDays: [0, 1, 2, 3, 4, 5, 6] },
+    date,
+    [],
+    false
+  );
+
+const isOvernight = (shift?: Shift) => Boolean(shift && shift.endTime <= shift.startTime);
+
+const csvCell = (v: string | number) => {
+  const str = String(v ?? '');
+  return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+};
 import { MarkAttendanceSheet } from '../components/attendance/MarkAttendanceSheet';
 import { reviewRegularization } from '../services/approvalService';
 
@@ -51,8 +91,9 @@ export const AttendancePage: React.FC = () => {
       return 'daily';
     }
   );
-  const [selectedDate, setSelectedDate] = useState('2026-09-23');
-  const [selectedMonth, setSelectedMonth] = useState('2026-09');
+  const today = todayStr();
+  const [selectedDate, setSelectedDate] = useState(today);
+  const [selectedMonth, setSelectedMonth] = useState(currentMonthStr());
   const [departmentFilter, setDepartmentFilter] = useState('');
 
   // Switch tabs when asked while this page is already open (e.g. from the notification bell)
@@ -74,8 +115,10 @@ export const AttendancePage: React.FC = () => {
 
   // Storage data
   const [employees, setEmployees] = useState<Employee[]>(() => storageService.getEmployees());
-  const [shifts] = useState<Shift[]>(() => storageService.getShifts());
+  const [shifts, setShifts] = useState<Shift[]>(() => storageService.getShifts());
   const [attendance, setAttendance] = useState<AttendanceRecord[]>(() => storageService.getAttendance());
+  const [holidays, setHolidays] = useState<Holiday[]>(() => storageService.getHolidays());
+  const [leaves, setLeaves] = useState<LeaveRequest[]>(() => storageService.getLeaves());
   const [regularizations, setRegularizations] = useState<RegularizationRequest[]>(() =>
     storageService.getRegularizations()
   );
@@ -87,17 +130,18 @@ export const AttendancePage: React.FC = () => {
     date: string;
     checkIn: string;
     checkOut: string;
-    status: AttendanceStatus;
+    /** '' = work it out from the check-in / check-out times. */
+    status: AttendanceStatus | '';
     notes: string;
   } | null>(null);
 
   // New Regularization Modal (for Employee)
   const [isRegModalOpen, setIsRegModalOpen] = useState(false);
   const [regForm, setRegForm] = useState({
-    date: '2026-09-22',
+    date: addDaysStr(today, -1),
     requestedCheckIn: '09:00',
     requestedCheckOut: '18:00',
-    reason: 'Biometric fingerprint scanner malfunction at front lobby.',
+    reason: '',
   });
 
   // Bulk Marker Modal
@@ -105,22 +149,61 @@ export const AttendancePage: React.FC = () => {
   const [bulkCheckIn, setBulkCheckIn] = useState('09:00');
   const [bulkCheckOut, setBulkCheckOut] = useState('18:00');
   const [bulkDept, setBulkDept] = useState('');
+  const [bulkDate, setBulkDate] = useState(today);
 
-  const departments = ['Engineering', 'Human Resources', 'Finance', 'Sales', 'Operations'];
+  const departments = Array.from(new Set(employees.map((e) => e.department).filter(Boolean))).sort();
 
   const reloadData = () => {
+    setEmployees(storageService.getEmployees());
+    setShifts(storageService.getShifts());
+    setHolidays(storageService.getHolidays());
+    setLeaves(storageService.getLeaves());
     setAttendance(storageService.getAttendance());
     setRegularizations(storageService.getRegularizations());
+  };
+
+  const shiftOf = (emp?: Employee) => shifts.find((s) => s.id === emp?.shiftId) || shifts[0];
+  const ownEmployeeId = user?.employeeId;
+
+  /** What a day with no record means for this employee (holiday, off day, leave, absent, not marked yet...). */
+  const unmarkedStatus = (emp: Employee, date: string) =>
+    resolveUnmarkedDay(emp, shiftOf(emp), date, holidays, leaves, today);
+
+  /** Open the edit dialog for one employee-day, pre-filled from its record or the shift. */
+  const openEditor = (emp: Employee, date: string, rec?: AttendanceRecord) => {
+    const shift = shiftOf(emp);
+    const unmarked = rec ? undefined : unmarkedStatus(emp, date);
+    let status: AttendanceStatus | '' = '';
+    if (rec) status = rec.status;
+    else if (unmarked === 'Holiday' || unmarked === 'Weekend' || unmarked === 'On Leave') status = unmarked;
+    setEditingRecord({
+      employeeId: emp.id,
+      employeeName: emp.name,
+      date,
+      checkIn: rec?.checkIn?.slice(0, 5) || shift?.startTime || '09:00',
+      checkOut: rec?.checkOut?.slice(0, 5) || (date === today ? '' : shift?.endTime || '18:00'),
+      status,
+      notes: rec && !rec.autoMarked ? rec.notes || '' : '',
+    });
   };
 
   // -------------------------------------------------------------
   // Daily View Computations
   // -------------------------------------------------------------
   const filteredEmployees = employees.filter((emp) => {
-    if (isEmployee && emp.id !== (user?.employeeId || 'EMP-001')) return false;
+    if (isEmployee && emp.id !== ownEmployeeId) return false;
     if (departmentFilter && emp.department !== departmentFilter) return false;
+    // Former staff only appear for periods where they still have attendance.
+    if (emp.status !== 'Active') {
+      const period = viewMode === 'monthly' ? selectedMonth : selectedDate;
+      return attendance.some((r) => r.employeeId === emp.id && r.date.startsWith(period));
+    }
     return true;
   });
+
+  const visibleRegularizations = isEmployee
+    ? regularizations.filter((r) => r.employeeId === ownEmployeeId)
+    : regularizations;
 
   const dailyRecordsMap = new Map<string, AttendanceRecord>();
   attendance
@@ -133,25 +216,49 @@ export const AttendancePage: React.FC = () => {
     if (!editingRecord) return;
 
     const emp = employees.find((e) => e.id === editingRecord.employeeId);
-    const shift = shifts.find((s) => s.id === emp?.shiftId) || shifts[0];
+    const shift = shiftOf(emp);
+    const timed = editingRecord.status === '' || TIMED_STATUSES.includes(editingRecord.status);
 
-    const evaluation = evaluateAttendanceStatus(
-      editingRecord.checkIn,
-      editingRecord.checkOut,
-      shift,
-      editingRecord.date
+    if (editingRecord.date > today) {
+      warning('Future date', 'Attendance can only be recorded for today or earlier. Use Leave Management to plan leave.');
+      return;
+    }
+    if (timed) {
+      if (!editingRecord.checkIn) {
+        warning('Check-in required', 'Enter a check-in time, or pick a status such as Absent or On Leave.');
+        return;
+      }
+      if (
+        editingRecord.checkOut &&
+        (editingRecord.checkOut === editingRecord.checkIn ||
+          (!isOvernight(shift) && editingRecord.checkOut < editingRecord.checkIn))
+      ) {
+        warning('Check the times', 'Check-out must be after check-in.');
+        return;
+      }
+    }
+
+    const evaluation = timed
+      ? evaluateTimes(editingRecord.checkIn, editingRecord.checkOut, shift, editingRecord.date)
+      : undefined;
+    const existing = attendance.find(
+      (r) => r.employeeId === editingRecord.employeeId && r.date === editingRecord.date
     );
 
     const record: AttendanceRecord = {
-      id: `att-${editingRecord.employeeId}-${editingRecord.date}`,
+      ...existing,
+      id: existing?.id || `att-${editingRecord.employeeId}-${editingRecord.date}`,
       employeeId: editingRecord.employeeId,
       date: editingRecord.date,
-      checkIn: editingRecord.checkIn || undefined,
-      checkOut: editingRecord.checkOut || undefined,
-      status: editingRecord.status || evaluation.status,
-      workedMinutes: evaluation.workedMinutes,
-      overtimeMinutes: evaluation.overtimeMinutes,
-      notes: editingRecord.notes,
+      checkIn: timed ? editingRecord.checkIn : undefined,
+      checkOut: timed && editingRecord.checkOut ? editingRecord.checkOut : undefined,
+      status: editingRecord.status || evaluation!.status,
+      workedMinutes: evaluation?.workedMinutes ?? 0,
+      overtimeMinutes: evaluation?.overtimeMinutes ?? 0,
+      isEarlyDeparture: evaluation?.isEarlyDeparture ?? false,
+      notes: editingRecord.notes || undefined,
+      modifiedBy: user?.name,
+      autoMarked: undefined,
     };
 
     storageService.saveOrUpdateAttendanceRecord(record);
@@ -162,34 +269,64 @@ export const AttendancePage: React.FC = () => {
 
   // Handle Bulk Attendance Mark
   const handleApplyBulk = () => {
-    const targets = employees.filter((e) => !bulkDept || e.department === bulkDept);
+    if (!bulkDate || bulkDate > today) {
+      warning('Invalid date', 'Bulk attendance can only be marked for today or earlier.');
+      return;
+    }
+    if (!bulkCheckIn) {
+      warning('Check-in required', 'Enter the check-in time to apply.');
+      return;
+    }
+    const targets = employees.filter(
+      (e) => e.status === 'Active' && (!bulkDept || e.department === bulkDept)
+    );
     let count = 0;
+    let skipped = 0;
 
     targets.forEach((emp) => {
-      const shift = shifts.find((s) => s.id === emp.shiftId) || shifts[0];
-      const evaluation = evaluateAttendanceStatus(
-        bulkCheckIn,
-        bulkCheckOut,
-        shift,
-        selectedDate
-      );
+      const shift = shiftOf(emp);
+      if (bulkCheckOut && (bulkCheckOut === bulkCheckIn || (!isOvernight(shift) && bulkCheckOut < bulkCheckIn))) {
+        skipped++;
+        return;
+      }
+      const existing = attendance.find((r) => r.employeeId === emp.id && r.date === bulkDate);
+      // Never overwrite attendance someone already recorded, and skip off days / leave.
+      const dayType = resolveUnmarkedDay(emp, shift, bulkDate, holidays, leaves, today);
+      if ((existing && !existing.autoMarked) || (dayType !== 'Absent' && dayType !== 'Pending')) {
+        skipped++;
+        return;
+      }
+      const evaluation = evaluateTimes(bulkCheckIn, bulkCheckOut, shift, bulkDate);
 
       const record: AttendanceRecord = {
-        id: `att-${emp.id}-${selectedDate}`,
+        id: existing?.id || `att-${emp.id}-${bulkDate}`,
         employeeId: emp.id,
-        date: selectedDate,
+        date: bulkDate,
         checkIn: bulkCheckIn,
-        checkOut: bulkCheckOut,
+        checkOut: bulkCheckOut || undefined,
         status: evaluation.status,
         workedMinutes: evaluation.workedMinutes,
         overtimeMinutes: evaluation.overtimeMinutes,
-        notes: 'Bulk marked by administrator',
+        isEarlyDeparture: evaluation.isEarlyDeparture,
+        notes: 'Bulk marked',
+        modifiedBy: user?.name,
       };
       storageService.saveOrUpdateAttendanceRecord(record);
       count++;
     });
 
-    success('Bulk Attendance Applied', `Updated attendance for ${count} employees.`);
+    if (count === 0) {
+      warning(
+        'Nothing to mark',
+        'Everyone selected is already marked, off, on leave, or the times are invalid for their shift.'
+      );
+      return;
+    }
+    success(
+      'Bulk Attendance Applied',
+      `Marked ${count} employee${count === 1 ? '' : 's'} for ${bulkDate}` +
+        (skipped ? `; skipped ${skipped} already marked, off or on leave.` : '.')
+    );
     reloadData();
     setIsBulkModalOpen(false);
   };
@@ -197,15 +334,46 @@ export const AttendancePage: React.FC = () => {
   // Submit Regularization
   const handleSubmitRegularization = (e: React.FormEvent) => {
     e.preventDefault();
-    const empId = user?.employeeId || 'EMP-001';
+    const empId = ownEmployeeId;
+    if (!empId) {
+      error('No employee profile', 'Your account is not linked to an employee record.');
+      return;
+    }
+    const emp = employees.find((x) => x.id === empId);
+    if (regForm.date > today) {
+      warning('Future date', 'A correction can only be requested for today or an earlier day.');
+      return;
+    }
+    if (emp?.joiningDate && regForm.date < emp.joiningDate) {
+      warning('Invalid date', 'That date is before your joining date.');
+      return;
+    }
+    if (
+      regForm.requestedCheckOut === regForm.requestedCheckIn ||
+      (!isOvernight(shiftOf(emp)) && regForm.requestedCheckOut < regForm.requestedCheckIn)
+    ) {
+      warning('Check the times', 'Check-out must be after check-in.');
+      return;
+    }
+    if (!regForm.reason.trim()) {
+      warning('Reason required', 'Explain why the attendance needs correcting.');
+      return;
+    }
+    if (regularizations.some((r) => r.employeeId === empId && r.date === regForm.date && r.status === 'Pending')) {
+      warning('Already requested', `You already have a pending correction for ${regForm.date}.`);
+      return;
+    }
+    const current = attendance.find((r) => r.employeeId === empId && r.date === regForm.date);
 
     const newReq: RegularizationRequest = {
       id: `reg-${Date.now()}`,
       employeeId: empId,
       date: regForm.date,
+      currentCheckIn: current?.checkIn,
+      currentCheckOut: current?.checkOut,
       requestedCheckIn: regForm.requestedCheckIn,
       requestedCheckOut: regForm.requestedCheckOut,
-      reason: regForm.reason,
+      reason: regForm.reason.trim(),
       status: 'Pending',
       createdAt: new Date().toISOString(),
     };
@@ -233,31 +401,36 @@ export const AttendancePage: React.FC = () => {
   // Export CSV
   const handleExportCSV = () => {
     const headers = ['Employee ID', 'Name', 'Department', 'Date', 'Check-In', 'Check-Out', 'Status', 'Worked (Hrs)', 'OT (Hrs)'];
+    const visibleIds = new Set(filteredEmployees.map((e) => e.id));
     const rows = attendance
-      .filter((r) => r.date.startsWith(selectedMonth))
+      .filter((r) => r.date.startsWith(selectedMonth) && visibleIds.has(r.employeeId))
+      .sort((a, b) => a.date.localeCompare(b.date) || a.employeeId.localeCompare(b.employeeId))
       .map((r) => {
         const emp = employees.find((e) => e.id === r.employeeId);
         return [
           r.employeeId,
-          `"${emp?.name || ''}"`,
+          emp?.name || '',
           emp?.department || '',
           r.date,
           r.checkIn || '',
           r.checkOut || '',
           r.status,
-          (r.workedMinutes / 60).toFixed(1),
-          (r.overtimeMinutes / 60).toFixed(1),
-        ].join(',');
+          ((r.workedMinutes || 0) / 60).toFixed(1),
+          ((r.overtimeMinutes || 0) / 60).toFixed(1),
+        ]
+          .map(csvCell)
+          .join(',');
       });
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows].join('\n');
-    const encodedUri = encodeURI(csvContent);
+    const blob = new Blob([[headers.join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
+    link.setAttribute('href', url);
     link.setAttribute('download', `WorkPulse_Attendance_${selectedMonth}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
     success('Export Complete', `Downloaded attendance for ${selectedMonth}`);
   };
 
@@ -328,7 +501,7 @@ export const AttendancePage: React.FC = () => {
               }`}
             >
               <FileCheck className="w-3.5 h-3.5" /> Regularizations
-              {regularizations.filter((r) => r.status === 'Pending').length > 0 && (
+              {visibleRegularizations.some((r) => r.status === 'Pending') && (
                 <span className="w-2 h-2 rounded-full bg-amber-500" />
               )}
             </button>
@@ -347,7 +520,10 @@ export const AttendancePage: React.FC = () => {
           {canView && (
             <>
               {canMark && (<button
-                onClick={() => setIsBulkModalOpen(true)}
+                onClick={() => {
+                  setBulkDate(viewMode === 'daily' && selectedDate <= today ? selectedDate : today);
+                  setIsBulkModalOpen(true);
+                }}
                 className="px-3.5 py-1.5 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-200 rounded-lg text-xs font-semibold hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors cursor-pointer"
               >
                 Mark Bulk
@@ -383,7 +559,8 @@ export const AttendancePage: React.FC = () => {
               <input
                 type="date"
                 value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
+                max={today}
+                onChange={(e) => e.target.value && setSelectedDate(e.target.value)}
                 className="px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
               />
             </div>
@@ -393,7 +570,8 @@ export const AttendancePage: React.FC = () => {
               <input
                 type="month"
                 value={selectedMonth}
-                onChange={(e) => setSelectedMonth(e.target.value)}
+                max={currentMonthStr()}
+                onChange={(e) => e.target.value && setSelectedMonth(e.target.value)}
                 className="px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
               />
             </div>
@@ -419,7 +597,7 @@ export const AttendancePage: React.FC = () => {
         </div>
 
         {viewMode === 'monthly' && (
-          <div className="flex items-center gap-3 text-xs text-neutral-500 font-medium">
+          <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-500 font-medium">
             <span className="flex items-center gap-1">
               <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" /> P (Present)
             </span>
@@ -430,7 +608,16 @@ export const AttendancePage: React.FC = () => {
               <span className="w-2.5 h-2.5 rounded-sm bg-rose-500" /> A (Absent)
             </span>
             <span className="flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-sm bg-orange-500" /> HD (Half Day)
+            </span>
+            <span className="flex items-center gap-1">
               <span className="w-2.5 h-2.5 rounded-sm bg-sky-500" /> LV (Leave)
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-sm bg-purple-500" /> H (Holiday)
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-sm bg-neutral-300 dark:bg-neutral-600" /> W (Off day)
             </span>
           </div>
         )}
@@ -459,9 +646,17 @@ export const AttendancePage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                {filteredEmployees.length === 0 && (
+                  <tr>
+                    <td colSpan={canMark ? 9 : 8} className="py-12 text-center text-neutral-400">
+                      No employees to show.
+                    </td>
+                  </tr>
+                )}
                 {filteredEmployees.map((emp) => {
                   const rec = dailyRecordsMap.get(emp.id);
                   const shift = shifts.find((s) => s.id === emp.shiftId);
+                  const dayStatus = rec ? rec.status : UNMARKED_LABEL[unmarkedStatus(emp, selectedDate)];
 
                   return (
                     <tr
@@ -502,23 +697,17 @@ export const AttendancePage: React.FC = () => {
                           : '—'}
                       </td>
                       <td className="py-3.5 px-4">
-                        <Badge status={rec?.status || 'Absent'} />
+                        <Badge status={dayStatus} />
+                        {rec?.autoMarked && rec.status === 'Absent' && (
+                          <span className="block text-[10px] text-neutral-400 mt-0.5">No attendance recorded</span>
+                        )}
                       </td>
                       {canMark && (
                         <td className="py-3.5 px-4 text-right">
                           <button
-                            onClick={() =>
-                              setEditingRecord({
-                                employeeId: emp.id,
-                                employeeName: emp.name,
-                                date: selectedDate,
-                                checkIn: rec?.checkIn || '09:00',
-                                checkOut: rec?.checkOut || '18:00',
-                                status: rec?.status || 'Present',
-                                notes: rec?.notes || '',
-                              })
-                            }
-                            className="p-1.5 text-neutral-400 hover:text-indigo-600 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                            onClick={() => openEditor(emp, selectedDate, rec)}
+                            disabled={selectedDate > today}
+                            className="p-1.5 text-neutral-400 hover:text-indigo-600 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors disabled:opacity-40 disabled:pointer-events-none"
                             title="Edit Record"
                           >
                             <Edit2 className="w-4 h-4" />
@@ -550,13 +739,19 @@ export const AttendancePage: React.FC = () => {
                     const dayNum = dStr.slice(8);
                     const dow = new Date(dStr + 'T00:00:00').getDay();
                     const isWk = dow === 0 || dow === 6;
+                    const isToday = dStr === today;
+                    const holidayName = holidays.find((h) => h.date === dStr)?.name;
                     return (
                       <th
                         key={dStr}
                         className={`py-2 px-1 text-center w-8 min-w-8 text-[11px] font-mono ${
-                          isWk ? 'bg-neutral-100 dark:bg-neutral-800/80 text-neutral-400' : ''
+                          isToday
+                            ? 'text-indigo-600 dark:text-indigo-400 font-bold'
+                            : isWk
+                            ? 'bg-neutral-100 dark:bg-neutral-800/80 text-neutral-400'
+                            : ''
                         }`}
-                        title={dStr}
+                        title={`${dStr}${holidayName ? ` · ${holidayName}` : ''}${isToday ? ' · Today' : ''}`}
                       >
                         {dayNum}
                       </th>
@@ -564,6 +759,7 @@ export const AttendancePage: React.FC = () => {
                   })}
                   <th className="py-3 px-2 text-center text-emerald-600 font-bold">P</th>
                   <th className="py-3 px-2 text-center text-amber-600 font-bold">L</th>
+                  <th className="py-3 px-2 text-center text-orange-600 font-bold">HD</th>
                   <th className="py-3 px-2 text-center text-rose-600 font-bold">A</th>
                   <th className="py-3 px-2 text-center text-sky-600 font-bold">LV</th>
                   <th className="py-3 px-3 text-right">Total Hrs</th>
@@ -575,9 +771,11 @@ export const AttendancePage: React.FC = () => {
                     (r) => r.employeeId === emp.id && r.date.startsWith(selectedMonth)
                   );
                   const recordMap = new Map(empRecords.map((r) => [r.date, r]));
+                  const empShift = shiftOf(emp);
 
                   let countP = 0;
                   let countL = 0;
+                  let countHD = 0;
                   let countA = 0;
                   let countLV = 0;
                   let totalMins = 0;
@@ -585,6 +783,7 @@ export const AttendancePage: React.FC = () => {
                   empRecords.forEach((r) => {
                     if (r.status === 'Present') countP++;
                     else if (r.status === 'Late') countL++;
+                    else if (r.status === 'Half Day') countHD++;
                     else if (r.status === 'Absent') countA++;
                     else if (r.status === 'On Leave') countLV++;
                     totalMins += r.workedMinutes || 0;
@@ -605,10 +804,13 @@ export const AttendancePage: React.FC = () => {
                       {monthDays.map((dStr) => {
                         const rec = recordMap.get(dStr);
                         const dow = new Date(dStr + 'T00:00:00').getDay();
-                        const isWeekend = dow === 0 || dow === 6;
+                        const isWeekend = !(empShift?.workingDays ?? [1, 2, 3, 4, 5]).includes(dow);
+                        const unmarked = rec ? undefined : unmarkedStatus(emp, dStr);
+                        const editable = canMark && dStr <= today && unmarked !== 'Not Joined';
 
-                        let symbol = '—';
+                        let symbol = '';
                         let colorClass = 'text-neutral-300 dark:text-neutral-600';
+                        let label: string = rec ? rec.status : UNMARKED_LABEL[unmarked!];
 
                         if (rec) {
                           if (rec.status === 'Present') {
@@ -619,6 +821,10 @@ export const AttendancePage: React.FC = () => {
                             symbol = 'L';
                             colorClass =
                               'bg-amber-100 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 font-bold';
+                          } else if (rec.status === 'Half Day') {
+                            symbol = 'HD';
+                            colorClass =
+                              'bg-orange-100 dark:bg-orange-950/80 text-orange-700 dark:text-orange-300 font-bold';
                           } else if (rec.status === 'Absent') {
                             symbol = 'A';
                             colorClass =
@@ -634,33 +840,39 @@ export const AttendancePage: React.FC = () => {
                             symbol = 'W';
                             colorClass = 'text-neutral-400';
                           }
-                        } else if (isWeekend) {
+                          if (rec.autoMarked && rec.status === 'Absent') label = 'Absent (no attendance recorded)';
+                        } else if (unmarked === 'Holiday') {
+                          symbol = 'H';
+                          colorClass = 'bg-purple-50 dark:bg-purple-950/60 text-purple-600';
+                        } else if (unmarked === 'Weekend') {
                           symbol = 'W';
                           colorClass = 'text-neutral-400 dark:text-neutral-600';
+                        } else if (unmarked === 'On Leave') {
+                          // Approved leave still ahead
+                          symbol = 'LV';
+                          colorClass = 'bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-400';
+                        } else if (unmarked === 'Pending') {
+                          symbol = '•';
+                          colorClass = 'text-amber-500 ring-1 ring-inset ring-amber-300 dark:ring-amber-700';
+                        } else if (unmarked === 'Absent') {
+                          symbol = 'A';
+                          colorClass = 'bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 font-bold';
                         }
 
                         return (
                           <td
                             key={dStr}
                             onClick={() => {
-                              if (canMark) {
-                                setEditingRecord({
-                                  employeeId: emp.id,
-                                  employeeName: emp.name,
-                                  date: dStr,
-                                  checkIn: rec?.checkIn || '09:00',
-                                  checkOut: rec?.checkOut || '18:00',
-                                  status: rec?.status || 'Present',
-                                  notes: rec?.notes || '',
-                                });
-                              }
+                              if (editable) openEditor(emp, dStr, rec);
                             }}
-                            className={`p-0.5 text-center cursor-pointer ${
+                            className={`p-0.5 text-center ${editable ? 'cursor-pointer' : 'cursor-default'} ${
                               isWeekend ? 'bg-neutral-50 dark:bg-neutral-800/40' : ''
                             }`}
-                            title={`${emp.name} · ${dStr}\nStatus: ${rec?.status || 'Unrecorded'}\nCheck-in: ${
-                              rec?.checkIn || '—'
-                            } | Out: ${rec?.checkOut || '—'}`}
+                            title={`${emp.name} · ${dStr}\nStatus: ${label}${
+                              rec?.checkIn || rec?.checkOut
+                                ? `\nCheck-in: ${rec?.checkIn || '—'} | Out: ${rec?.checkOut || '—'}`
+                                : ''
+                            }${rec?.notes && !rec.autoMarked ? `\nNote: ${rec.notes}` : ''}`}
                           >
                             <span
                               className={`w-6 h-6 inline-flex items-center justify-center rounded text-[10px] font-mono transition-transform hover:scale-110 ${colorClass}`}
@@ -676,6 +888,9 @@ export const AttendancePage: React.FC = () => {
                       </td>
                       <td className="py-2 px-2 text-center font-mono font-semibold text-amber-600">
                         {countL}
+                      </td>
+                      <td className="py-2 px-2 text-center font-mono font-semibold text-orange-600">
+                        {countHD}
                       </td>
                       <td className="py-2 px-2 text-center font-mono font-semibold text-rose-600">
                         {countA}
@@ -733,14 +948,14 @@ export const AttendancePage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
-                {regularizations.length === 0 ? (
+                {visibleRegularizations.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-12 text-center text-neutral-400">
+                    <td colSpan={canApprove ? 7 : 6} className="py-12 text-center text-neutral-400">
                       No regularization requests recorded.
                     </td>
                   </tr>
                 ) : (
-                  regularizations.map((reg) => {
+                  visibleRegularizations.map((reg) => {
                     const emp = employees.find((e) => e.id === reg.employeeId);
                     return (
                       <tr
@@ -758,6 +973,11 @@ export const AttendancePage: React.FC = () => {
                         <td className="py-3.5 px-4 font-mono font-medium">{reg.date}</td>
                         <td className="py-3.5 px-4 font-mono text-indigo-600 dark:text-indigo-400">
                           {reg.requestedCheckIn} – {reg.requestedCheckOut}
+                          {(reg.currentCheckIn || reg.currentCheckOut) && (
+                            <span className="block text-[10px] text-neutral-400">
+                              was {reg.currentCheckIn || '—'} – {reg.currentCheckOut || '—'}
+                            </span>
+                          )}
                         </td>
                         <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300 max-w-xs">
                           <p className="line-clamp-2">{reg.reason}</p>
@@ -825,6 +1045,7 @@ export const AttendancePage: React.FC = () => {
                 <input
                   type="time"
                   value={editingRecord.checkIn}
+                  disabled={editingRecord.status !== '' && !TIMED_STATUSES.includes(editingRecord.status)}
                   onChange={(e) =>
                     setEditingRecord({ ...editingRecord, checkIn: e.target.value })
                   }
@@ -839,6 +1060,7 @@ export const AttendancePage: React.FC = () => {
                 <input
                   type="time"
                   value={editingRecord.checkOut}
+                  disabled={editingRecord.status !== '' && !TIMED_STATUSES.includes(editingRecord.status)}
                   onChange={(e) =>
                     setEditingRecord({ ...editingRecord, checkOut: e.target.value })
                   }
@@ -856,11 +1078,12 @@ export const AttendancePage: React.FC = () => {
                 onChange={(e) =>
                   setEditingRecord({
                     ...editingRecord,
-                    status: e.target.value as AttendanceStatus,
+                    status: e.target.value as AttendanceStatus | '',
                   })
                 }
                 className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
               >
+                <option value="">Auto (from check-in / check-out)</option>
                 <option value="Present">Present</option>
                 <option value="Late">Late</option>
                 <option value="Half Day">Half Day</option>
@@ -869,6 +1092,13 @@ export const AttendancePage: React.FC = () => {
                 <option value="Holiday">Holiday</option>
                 <option value="Weekend">Weekend</option>
               </select>
+              <p className="text-[11px] text-neutral-400 mt-1">
+                {editingRecord.status === ''
+                  ? 'Present, Late or Half Day is worked out from the times and shift rules. Leave check-out empty if they have not left yet.'
+                  : TIMED_STATUSES.includes(editingRecord.status)
+                  ? 'This status is kept as chosen; the times still set worked hours and overtime.'
+                  : 'No times are recorded for this status.'}
+              </p>
             </div>
 
             <div>
@@ -913,10 +1143,22 @@ export const AttendancePage: React.FC = () => {
           isOpen={isBulkModalOpen}
           onClose={() => setIsBulkModalOpen(false)}
           title="Mark Bulk Attendance"
-          subtitle={`Batch mark attendance for ${selectedDate}`}
+          subtitle="Mark everyone not yet marked. Existing records, off days and leave are left alone."
           maxWidth="md"
         >
           <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
+                Date
+              </label>
+              <input
+                type="date"
+                value={bulkDate}
+                max={today}
+                onChange={(e) => setBulkDate(e.target.value)}
+                className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
+              />
+            </div>
             <div>
               <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
                 Target Department
@@ -1000,6 +1242,7 @@ export const AttendancePage: React.FC = () => {
               <input
                 type="date"
                 required
+                max={today}
                 value={regForm.date}
                 onChange={(e) => setRegForm({ ...regForm, date: e.target.value })}
                 className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"

@@ -40,6 +40,8 @@ The user refers to these by number ("push to repo 2"). Both are git remotes of t
 
 **Data layer: `src/services/storageService.ts`.** A singleton wrapping `localStorage` (`workpulse_*` keys) for settings, employees, shifts, holidays, attendance, leaves, regularizations, loans, payrolls and user accounts. It seeds from `src/data/seedData.ts` on first load (guarded by `workpulse_seeded_v3`) and runs small one-time migrations in `ensureInitialized()`. Views read it straight into `useState(() => storageService.getX())` and re-read after writes. Nothing is reactive, so after saving, reload the affected state (or call the parent's `onSaved` / `onRefreshData`).
 
+**Every past day has an attendance record.** `storageService.syncAttendance()` runs on load, after saving holidays / shifts / leaves / employees, and on the first read of a new day. For each active employee it fills days nobody marked with Holiday, Weekend (off day for their shift), On Leave (approved leave) or, on a past working day, Absent. These records carry `autoMarked: true` and are re-derived when holidays, shifts or leaves change; a record a person saves (`saveOrUpdateAttendanceRecord` clears the flag) is never touched. Today's working day stays unmarked ("Not Marked") until someone marks it. For a day with no record, views use `resolveUnmarkedDay()` from `attendanceEngine.ts` rather than guessing.
+
 **Access control: `src/utils/permissions.ts` + `src/context/AuthContext.tsx`.**
 - Roles: `manager` (head, full access), `attendance_manager`, `payroll_manager`, `assistant_manager`, `employee`.
 - Each role maps to a list of `Permission` strings.
@@ -59,7 +61,7 @@ The user refers to these by number ("push to repo 2"). Both are git remotes of t
 - `services/analyticsService.ts`: KPI and chart aggregations for Analytics.
 - `services/approvalService.ts`: `reviewLeave` / `reviewRegularization`. Approving leave writes `On Leave` attendance for the employee's shift working days; approving a correction re-evaluates the day's status. The bell (TopBar), LeavesPage and AttendancePage all call these, so any change to approval behaviour goes here.
 
-**Dates:** always build `YYYY-MM-DD` strings from local date parts. `toISOString().slice(0, 10)` shifts the day in UTC+5 (Pakistan), which caused off-by-one leave records before.
+**Dates:** use `utils/dateUtils.ts` (`todayStr()`, `currentMonthStr()`, `addDaysStr()`, `toDateStr()`), never a hard-coded date. Always build `YYYY-MM-DD` strings from local date parts. `toISOString().slice(0, 10)` shifts the day in UTC+5 (Pakistan), which caused off-by-one leave records before.
 
 **Settings** come from `SettingsContext` (`useSettings()`: `settings`, `updateSettings`, `formatMoney`, dark mode). Read the annual leave policy via `getAnnualLeavePolicy(settings)`, which fills in defaults for older saved settings.
 

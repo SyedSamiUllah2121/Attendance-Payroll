@@ -3,6 +3,14 @@ import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
 import { LeaveRequest, RegularizationRequest } from '../../types';
 import { storageService } from '../../services/storageService';
+import { useAuth } from '../../context/AuthContext';
+
+/** Fired after the bell approves / rejects something, so the open page can reload its data. */
+export const DATA_CHANGED_EVENT = 'workpulse:data-changed';
+
+const readPendingLeaves = () => storageService.getLeaves().filter((l) => l.status === 'Pending');
+const readPendingRegs = () => storageService.getRegularizations().filter((r) => r.status === 'Pending');
+const pendingKey = (items: { id: string }[]) => items.map((i) => i.id).join('|');
 
 interface AppLayoutProps {
   currentTab?: string;
@@ -25,14 +33,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   onRefreshData: propRefresh,
   children,
 }) => {
+  const { can } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const [leaves, setLeaves] = useState<LeaveRequest[]>(() =>
-    propLeaves || storageService.getLeaves().filter((l) => l.status === 'Pending')
+    propLeaves || readPendingLeaves()
   );
   const [regs, setRegs] = useState<RegularizationRequest[]>(() =>
-    propRegs || storageService.getRegularizations().filter((r) => r.status === 'Pending')
+    propRegs || readPendingRegs()
   );
 
   const activeTab = currentPage || currentTab || 'dashboard';
@@ -41,11 +50,38 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
     else if (onSelectTab) onSelectTab(tab);
   };
 
-  const handleRefresh = () => {
-    setLeaves(storageService.getLeaves().filter((l) => l.status === 'Pending'));
-    setRegs(storageService.getRegularizations().filter((r) => r.status === 'Pending'));
-    if (propRefresh) propRefresh();
+  // Re-read the pending lists, only updating state when they actually changed.
+  const syncPending = () => {
+    if (!propLeaves) {
+      const next = readPendingLeaves();
+      setLeaves((prev) => (pendingKey(prev) === pendingKey(next) ? prev : next));
+    }
+    if (!propRegs) {
+      const next = readPendingRegs();
+      setRegs((prev) => (pendingKey(prev) === pendingKey(next) ? prev : next));
+    }
   };
+
+  const handleRefresh = () => {
+    syncPending();
+    if (propRefresh) propRefresh();
+    // Let the open page (e.g. the dashboard's approvals widget) pick up the change.
+    window.dispatchEvent(new Event(DATA_CHANGED_EVENT));
+  };
+
+  // Pages approve / submit requests without telling the layout, so keep the bell and
+  // sidebar badges in step: on page change, on other tabs' writes, and on a light poll.
+  useEffect(() => {
+    syncPending();
+    const onStorage = () => syncPending();
+    window.addEventListener('storage', onStorage);
+    const timer = window.setInterval(syncPending, 2000);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   useEffect(() => {
     if (propLeaves) setLeaves(propLeaves);
@@ -64,7 +100,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
         onToggleCollapse={() => setCollapsed((prev) => !prev)}
         mobileOpen={mobileOpen}
         onCloseMobile={() => setMobileOpen(false)}
-        pendingApprovalsCount={leaves.length + regs.length}
+        pendingLeavesCount={can('leaves.approve') ? leaves.length : 0}
+        pendingRegularizationsCount={can('attendance.approve') ? regs.length : 0}
       />
 
       <div

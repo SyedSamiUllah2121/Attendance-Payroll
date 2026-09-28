@@ -18,6 +18,19 @@ import { useNotification } from '../context/NotificationContext';
 import { storageService } from '../services/storageService';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { AppSettings } from '../types';
+import { getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
+import { getProvidentFundRate } from '../utils/payrollEngine';
+import { todayStr } from '../utils/dateUtils';
+
+const isArr = (v: unknown): v is unknown[] => Array.isArray(v);
+/** Every item is an object carrying the given string fields. */
+const hasFields = (list: unknown[], fields: string[]) =>
+  list.every(
+    (x) =>
+      !!x &&
+      typeof x === 'object' &&
+      fields.every((f) => typeof (x as Record<string, unknown>)[f] === 'string')
+  );
 
 export const SettingsPage: React.FC = () => {
   const { settings, updateSettings, darkMode, toggleDarkMode, refreshSettings } = useSettings();
@@ -39,8 +52,10 @@ export const SettingsPage: React.FC = () => {
     },
     payroll: {
       ...settings.payroll,
-      providentFundRate: settings.payroll.providentFundRate ?? settings.payroll.providentFundPercentage ?? 0.05,
-      socialSecurityRate: settings.payroll.socialSecurityRate ?? 0.01,
+      // Stored as a fraction in providentFundRate (and as a percent in providentFundPercentage)
+      providentFundRate: getProvidentFundRate(settings),
+      providentFundPercentage: Math.round(getProvidentFundRate(settings) * 10000) / 100,
+      socialSecurityFixed: settings.payroll.socialSecurityFixed ?? 370,
     },
     leaveQuotas: {
       Annual: settings.leaveQuotas?.Annual ?? 30,
@@ -55,12 +70,40 @@ export const SettingsPage: React.FC = () => {
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    updateSettings(formData);
+    if (!formData.company.name.trim()) {
+      error('Validation Error', 'Company name is required.');
+      return;
+    }
+    if (!formData.company.currency.trim()) {
+      error('Validation Error', 'Currency code is required.');
+      return;
+    }
+    const next: AppSettings = {
+      ...formData,
+      company: {
+        ...formData.company,
+        name: formData.company.name.trim(),
+        currency: formData.company.currency.trim(),
+      },
+      // Edited on the Annual Leave page; don't overwrite it with the copy loaded here
+      annualLeavePolicy: settings.annualLeavePolicy,
+      // Older settings also carry `leaves`, which other pages read first: keep it in step
+      ...(formData.leaves && {
+        leaves: {
+          ...formData.leaves,
+          sick: formData.leaveQuotas.Sick,
+          casual: formData.leaveQuotas.Casual,
+        },
+      }),
+    };
+    updateSettings(next);
+    setFormData(next);
     success('Settings Updated', 'Company configurations have been saved successfully.');
   };
 
   const handleExportBackup = () => {
     const backup = {
+      app: 'WorkPulse',
       timestamp: new Date().toISOString(),
       employees: storageService.getEmployees(),
       shifts: storageService.getShifts(),
@@ -71,13 +114,14 @@ export const SettingsPage: React.FC = () => {
       regularizations: storageService.getRegularizations(),
       holidays: storageService.getHolidays(),
       settings: storageService.getSettings(),
+      users: storageService.getUsers(),
     };
 
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `WorkPulse_Backup_${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `WorkPulse_Backup_${todayStr()}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -86,29 +130,81 @@ export const SettingsPage: React.FC = () => {
   };
 
   const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
+    // Clear the input so choosing the same file again still triggers a restore
+    input.value = '';
     if (!file) return;
 
     const reader = new FileReader();
+    reader.onerror = () => error('Read Error', 'Could not read the selected file.');
     reader.onload = (event) => {
+      let json: Record<string, unknown>;
       try {
-        const json = JSON.parse(event.target?.result as string);
-        if (json.employees && json.attendance) {
-          localStorage.setItem('workpulse_employees', JSON.stringify(json.employees));
-          localStorage.setItem('workpulse_attendance', JSON.stringify(json.attendance));
-          if (json.shifts) localStorage.setItem('workpulse_shifts', JSON.stringify(json.shifts));
-          if (json.leaves) localStorage.setItem('workpulse_leaves', JSON.stringify(json.leaves));
-          if (json.payrolls) localStorage.setItem('workpulse_payrolls', JSON.stringify(json.payrolls));
-          if (json.loans) localStorage.setItem('workpulse_loans', JSON.stringify(json.loans));
-          if (json.settings) localStorage.setItem('workpulse_settings', JSON.stringify(json.settings));
-          success('Backup Restored', 'Reloading system state...');
-          setTimeout(() => window.location.reload(), 1000);
-        } else {
-          error('Invalid File', 'Provided JSON does not match WorkPulse schema.');
-        }
-      } catch (err) {
-        error('Parse Error', 'Failed to read JSON backup file.');
+        json = JSON.parse(event.target?.result as string);
+      } catch {
+        error('Parse Error', 'The file is not valid JSON.');
+        return;
       }
+      if (!json || typeof json !== 'object' || Array.isArray(json)) {
+        error('Invalid File', 'Provided JSON does not match the WorkPulse backup format.');
+        return;
+      }
+
+      // Validate everything before writing anything, so a bad file can't leave half a restore
+      const problems: string[] = [];
+      if (!isArr(json.employees) || !hasFields(json.employees, ['id', 'name']))
+        problems.push('employees');
+      if (!isArr(json.attendance) || !hasFields(json.attendance, ['employeeId', 'date', 'status']))
+        problems.push('attendance');
+      const optionalLists: [string, string[]][] = [
+        ['shifts', ['id', 'startTime', 'endTime']],
+        ['leaves', ['id', 'employeeId', 'fromDate', 'toDate']],
+        ['payrolls', ['id', 'month']],
+        ['loans', ['id', 'employeeId']],
+        ['regularizations', ['id', 'employeeId', 'date']],
+        ['holidays', ['id', 'date']],
+        ['users', ['id', 'email', 'password', 'role']],
+      ];
+      optionalLists.forEach(([key, fields]) => {
+        const v = json[key];
+        if (v !== undefined && (!isArr(v) || !hasFields(v, fields))) problems.push(key);
+      });
+      const s = json.settings as Partial<AppSettings> | undefined;
+      if (s !== undefined && (!s || typeof s !== 'object' || !s.company || !s.attendance || !s.payroll))
+        problems.push('settings');
+      const users = json.users as { role: string; status?: string }[] | undefined;
+      if (isArr(users) && !users.some((u) => u.role === 'manager' && u.status === 'Active'))
+        problems.push('users (no active Head Manager)');
+      if (isArr(json.shifts) && json.shifts.length === 0) problems.push('shifts (empty)');
+
+      if (problems.length > 0) {
+        error('Invalid Backup', `Nothing was restored. Problem with: ${problems.join(', ')}.`);
+        return;
+      }
+
+      const keys: Record<string, string> = {
+        employees: 'workpulse_employees',
+        attendance: 'workpulse_attendance',
+        shifts: 'workpulse_shifts',
+        leaves: 'workpulse_leaves',
+        payrolls: 'workpulse_payrolls',
+        loans: 'workpulse_loans',
+        regularizations: 'workpulse_regularizations',
+        holidays: 'workpulse_holidays',
+        settings: 'workpulse_settings',
+        users: 'workpulse_users',
+      };
+      try {
+        Object.entries(keys).forEach(([field, key]) => {
+          if (json[field] !== undefined) localStorage.setItem(key, JSON.stringify(json[field]));
+        });
+      } catch {
+        error('Restore Failed', 'Browser storage is full or unavailable.');
+        return;
+      }
+      success('Backup Restored', 'Reloading system state...');
+      setTimeout(() => window.location.reload(), 1000);
     };
     reader.readAsText(file);
   };
@@ -317,7 +413,7 @@ export const SettingsPage: React.FC = () => {
                   className="w-full px-3 py-2 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
                 />
                 <span className="text-[11px] text-neutral-400 mt-1 block">
-                  Arrivals after this offset mark the employee as &ldquo;Late&rdquo;.
+                  Company default. Late marks use each shift&rsquo;s own grace period (Shifts page).
                 </span>
               </div>
 
@@ -343,7 +439,7 @@ export const SettingsPage: React.FC = () => {
                   className="w-full px-3 py-2 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
                 />
                 <span className="text-[11px] text-neutral-400 mt-1 block">
-                  Minimum worked hours to be credited a Half-Day rather than Absent.
+                  Company default. Half days use each shift&rsquo;s own threshold (Shifts page).
                 </span>
               </div>
 
@@ -395,7 +491,8 @@ export const SettingsPage: React.FC = () => {
                   htmlFor="latePenaltyRule"
                   className="text-xs font-medium text-neutral-700 dark:text-neutral-300 cursor-pointer"
                 >
-                  Enable 3 Late Marks = 0.5 Day Loss of Pay (LOP) Rule
+                  Enable {formData.attendance.latePenaltyEveryCount || 3} Late Marks ={' '}
+                  {formData.attendance.latePenaltyHalfDays ?? 0.5} Day Loss of Pay (LOP) Rule
                 </label>
               </div>
             </div>
@@ -409,31 +506,23 @@ export const SettingsPage: React.FC = () => {
               Annual Leave Entitlements
             </h3>
             <p className="text-xs text-neutral-500">
-              Annual quotas allocated to each employee on contract inception
+              Yearly leave allowances for each employee
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
               <div>
                 <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
-                  Annual Paid Leave (Days)
+                  Annual Paid Leave (Days / Year)
                 </label>
                 <input
                   type="number"
-                  min="0"
-                  max="30"
-                  value={formData.leaveQuotas?.Annual ?? 30}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value) || 0;
-                    setFormData({
-                      ...formData,
-                      leaveQuotas: {
-                        ...formData.leaveQuotas,
-                        Annual: val,
-                      },
-                    });
-                  }}
-                  className="w-full px-3 py-2 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
+                  readOnly
+                  value={getAnnualLeavePolicy(settings).monthlyDays.reduce((a, d) => a + d, 0)}
+                  className="w-full px-3 py-2 text-xs bg-neutral-100 dark:bg-neutral-800/60 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-500 dark:text-neutral-400 font-mono cursor-not-allowed"
                 />
+                <span className="text-[11px] text-neutral-400 mt-1 block">
+                  Earned monthly; change it on the Annual Leave page.
+                </span>
               </div>
 
               <div>
@@ -520,49 +609,49 @@ export const SettingsPage: React.FC = () => {
 
               <div>
                 <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
-                  Provident Fund Rate (%)
+                  Provident Fund Rate (% of Basic)
                 </label>
                 <input
                   type="number"
                   step="0.5"
                   min="0"
                   max="15"
-                  value={(formData.payroll.providentFundRate ?? formData.payroll.providentFundPercentage ?? 0.05) * 100}
+                  value={Math.round(getProvidentFundRate(formData) * 10000) / 100}
                   onChange={(e) => {
-                    const rate = (parseFloat(e.target.value) || 0) / 100;
+                    const pct = Math.min(15, Math.max(0, parseFloat(e.target.value) || 0));
                     setFormData({
                       ...formData,
                       payroll: {
                         ...formData.payroll,
-                        providentFundRate: rate,
-                        providentFundPercentage: rate,
+                        // Fraction in providentFundRate, percent in providentFundPercentage
+                        providentFundRate: pct / 100,
+                        providentFundPercentage: pct,
                       },
                     });
                   }}
                   className="w-full px-3 py-2 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
                 />
                 <span className="text-[11px] text-neutral-400 mt-1 block">
-                  Matched equally by employer (5% employee + 5% employer).
+                  Deducted from the employee&rsquo;s basic salary each month.
                 </span>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
-                  Social Security / EOBI Rate (%)
+                  Social Security / EOBI ({formData.company.currency} / month)
                 </label>
                 <input
                   type="number"
-                  step="0.1"
+                  step="10"
                   min="0"
-                  max="5"
-                  value={(formData.payroll.socialSecurityRate ?? 0.01) * 100}
+                  value={formData.payroll.socialSecurityFixed}
                   onChange={(e) => {
-                    const rate = (parseFloat(e.target.value) || 0) / 100;
+                    const amount = Math.max(0, parseFloat(e.target.value) || 0);
                     setFormData({
                       ...formData,
                       payroll: {
                         ...formData.payroll,
-                        socialSecurityRate: rate,
+                        socialSecurityFixed: amount,
                       },
                     });
                   }}
@@ -592,7 +681,7 @@ export const SettingsPage: React.FC = () => {
                   <Download className="w-4 h-4 text-indigo-600" /> Export System Backup
                 </h4>
                 <p className="text-xs text-neutral-500 mb-3">
-                  Download a JSON file containing all employees, attendance logs, and payroll runs.
+                  Download a JSON file with all employees, attendance, leave, payroll, loans, settings and user accounts.
                 </p>
                 <button
                   type="button"
@@ -610,7 +699,7 @@ export const SettingsPage: React.FC = () => {
                 <p className="text-xs text-neutral-500 mb-3">
                   Restore previously exported system state from a WorkPulse JSON backup.
                 </p>
-                <label className="cursor-pointer px-3.5 py-1.5 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded-lg text-xs font-semibold text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 transition-colors inline-block">
+                <label className="cursor-pointer px-3.5 py-1.5 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded-lg text-xs font-semibold text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-600 transition-colors inline-block">
                   Upload Backup JSON
                   <input
                     type="file"
@@ -628,8 +717,8 @@ export const SettingsPage: React.FC = () => {
                 <ShieldAlert className="w-4 h-4" /> Reset Environment
               </div>
               <p className="text-xs text-neutral-600 dark:text-neutral-300">
-                Clears all custom adjustments and restores fresh, pristine seed data for all 10
-                employees, complete attendance logs, payroll drafts, and loans.
+                Clears all custom adjustments and restores the demo employees, attendance logs,
+                payroll runs, loans and sign-in accounts.
               </p>
               <button
                 type="button"

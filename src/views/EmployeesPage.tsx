@@ -33,6 +33,16 @@ import {
   formatService,
   getAnnualLeavePolicy,
 } from '../utils/annualLeaveEngine';
+import { todayStr } from '../utils/dateUtils';
+
+/** Next free EMP-### id. Checks every stored employee so ids are never reused. */
+const nextEmployeeId = (list: Employee[]): string => {
+  const maxIdNum = list.reduce((max, e) => {
+    const num = parseInt(e.id.replace('EMP-', ''), 10);
+    return !isNaN(num) && num > max ? num : max;
+  }, 0);
+  return `EMP-${String(maxIdNum + 1).padStart(3, '0')}`;
+};
 
 interface EmployeesPageProps {
   onOpenPayslip?: (employeeId: string) => void;
@@ -64,8 +74,23 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
   const [profileTab, setProfileTab] = useState<'overview' | 'attendance' | 'leaves' | 'annual' | 'payslips' | 'documents'>('overview');
   const [deactivatingEmployee, setDeactivatingEmployee] = useState<Employee | null>(null);
 
-  // Departments list
-  const departments = ['Engineering', 'Human Resources', 'Finance', 'Sales', 'Operations'];
+  // Departments list (plus any other department already used by an employee)
+  const departments = Array.from(
+    new Set([
+      'Engineering',
+      'Human Resources',
+      'Finance',
+      'Sales',
+      'Operations',
+      ...employees.map((e) => e.department).filter(Boolean),
+    ])
+  );
+
+  // Payroll components, as the payroll engine computes them
+  const hraPct = settings.payroll.hraPercentage ?? 40;
+  const medicalPct = settings.payroll.medicalPercentage ?? 10;
+  const conveyance = settings.payroll.conveyanceFixed ?? 5000;
+  const grossOf = (basic: number) => basic + (basic * hraPct) / 100 + (basic * medicalPct) / 100 + conveyance;
 
   // Form Fields State
   const [formData, setFormData] = useState({
@@ -79,7 +104,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
     department: 'Engineering',
     designation: '',
     employmentType: 'Permanent' as EmploymentType,
-    joiningDate: '2026-01-15',
+    joiningDate: todayStr(),
     shiftId: 'shift-morning',
     bankName: 'Meezan Bank',
     accountNumber: '',
@@ -94,15 +119,28 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
   const viewingRecord = viewingEmployee
     ? computeLeaveRecord(viewingEmployee, storageService.getLeaves(), getAnnualLeavePolicy(settings))
     : undefined;
+  // Profile tabs: newest first
+  const viewingAttendance = viewingEmployee
+    ? storageService
+        .getAttendance()
+        .filter((r) => r.employeeId === viewingEmployee.id)
+        .sort((a, b) => b.date.localeCompare(a.date))
+        .slice(0, 15)
+    : [];
+  const viewingLeaves = viewingEmployee
+    ? storageService
+        .getLeaves()
+        .filter((l) => l.employeeId === viewingEmployee.id)
+        .sort((a, b) => b.fromDate.localeCompare(a.fromDate))
+    : [];
+  const viewingPayslips = viewingEmployee
+    ? storageService
+        .getPayrolls()
+        .filter((run) => run.items.some((i) => i.employeeId === viewingEmployee.id))
+        .sort((a, b) => b.month.localeCompare(a.month))
+    : [];
 
   const handleOpenAdd = () => {
-    // Generate next ID
-    const maxIdNum = employees.reduce((max, e) => {
-      const num = parseInt(e.id.replace('EMP-', ''), 10);
-      return !isNaN(num) && num > max ? num : max;
-    }, 0);
-    const nextId = `EMP-${String(maxIdNum + 1).padStart(3, '0')}`;
-
     setEditingEmployee(null);
     setFormData({
       name: '',
@@ -115,7 +153,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
       department: 'Engineering',
       designation: '',
       employmentType: 'Permanent',
-      joiningDate: new Date().toISOString().slice(0, 10),
+      joiningDate: todayStr(),
       shiftId: shifts[0]?.id || 'shift-morning',
       bankName: 'Standard Chartered Bank',
       accountNumber: 'PK00SCBL0000000000000000',
@@ -151,28 +189,54 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
   const handleSaveEmployee = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!formData.name.trim() || !formData.email.trim() || !formData.designation.trim()) {
+    const data = {
+      ...formData,
+      name: formData.name.trim(),
+      email: formData.email.trim(),
+      designation: formData.designation.trim(),
+    };
+    if (!data.name || !data.email || !data.designation) {
       error('Validation Error', 'Full name, email, and designation are required.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+      error('Validation Error', 'Enter a valid email address.');
+      return;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data.joiningDate)) {
+      error('Validation Error', 'Joining date is required.');
+      return;
+    }
+    if (data.dob && data.dob >= data.joiningDate) {
+      error('Validation Error', 'Date of birth must be before the joining date.');
+      return;
+    }
+    if (!(data.basicSalary > 0)) {
+      error('Validation Error', 'Basic salary must be greater than zero.');
+      return;
+    }
+
+    // Always check against what is stored, not this page's copy
+    const stored = storageService.getEmployees();
+    const duplicate = stored.find(
+      (emp) => emp.id !== editingEmployee?.id && emp.email.toLowerCase() === data.email.toLowerCase()
+    );
+    if (duplicate) {
+      error('Email in use', `${duplicate.name} (${duplicate.id}) already uses ${data.email}.`);
       return;
     }
 
     if (editingEmployee) {
       const updated: Employee = {
         ...editingEmployee,
-        ...formData,
+        ...data,
       };
       storageService.updateEmployee(updated);
       success('Employee Updated', `Updated profile of ${updated.name}`);
     } else {
-      const maxIdNum = employees.reduce((max, emp) => {
-        const num = parseInt(emp.id.replace('EMP-', ''), 10);
-        return !isNaN(num) && num > max ? num : max;
-      }, 0);
-      const newId = `EMP-${String(maxIdNum + 1).padStart(3, '0')}`;
-
       const created: Employee = {
-        id: newId,
-        ...formData,
+        id: nextEmployeeId(stored),
+        ...data,
       };
       storageService.addEmployee(created);
       success('Employee Added', `Created ${created.name} (${created.id})`);
@@ -226,10 +290,9 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
     });
 
   const totalPages = Math.ceil(filteredEmployees.length / pageSize) || 1;
-  const paginatedEmployees = filteredEmployees.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize
-  );
+  // The list can shrink (e.g. after deactivating under a status filter); stay on a real page
+  const page = Math.min(currentPage, totalPages);
+  const paginatedEmployees = filteredEmployees.slice((page - 1) * pageSize, page * pageSize);
 
   return (
     <div className="space-y-6">
@@ -486,24 +549,24 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
         {/* Pagination Footer */}
         <div className="px-6 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-between text-xs text-neutral-500">
           <span>
-            Showing {(currentPage - 1) * pageSize + 1} to{' '}
-            {Math.min(currentPage * pageSize, filteredEmployees.length)} of{' '}
-            {filteredEmployees.length} employees
+            {filteredEmployees.length === 0
+              ? 'No employees'
+              : `Showing ${(page - 1) * pageSize + 1} to ${Math.min(page * pageSize, filteredEmployees.length)} of ${filteredEmployees.length} employees`}
           </span>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage === 1}
+              onClick={() => setCurrentPage(Math.max(1, page - 1))}
+              disabled={page === 1}
               className="p-1 rounded-lg border border-neutral-200 dark:border-neutral-700 disabled:opacity-40 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
             <span className="font-medium">
-              Page {currentPage} of {totalPages}
+              Page {page} of {totalPages}
             </span>
             <button
-              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-              disabled={currentPage === totalPages}
+              onClick={() => setCurrentPage(Math.min(totalPages, page + 1))}
+              disabled={page === totalPages}
               className="p-1 rounded-lg border border-neutral-200 dark:border-neutral-700 disabled:opacity-40 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
             >
               <ChevronRight className="w-4 h-4" />
@@ -768,27 +831,27 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             {/* Live calculation preview */}
             <div className="pt-2 text-xs flex flex-wrap gap-4 text-neutral-600 dark:text-neutral-400 border-t border-neutral-200 dark:border-neutral-700">
               <span>
-                HRA (40%):{' '}
+                HRA ({hraPct}%):{' '}
                 <strong className="text-neutral-900 dark:text-neutral-100">
-                  {formatMoney((formData.basicSalary * 40) / 100)}
+                  {formatMoney((formData.basicSalary * hraPct) / 100)}
                 </strong>
               </span>
               <span>
-                Medical (10%):{' '}
+                Medical ({medicalPct}%):{' '}
                 <strong className="text-neutral-900 dark:text-neutral-100">
-                  {formatMoney((formData.basicSalary * 10) / 100)}
+                  {formatMoney((formData.basicSalary * medicalPct) / 100)}
                 </strong>
               </span>
               <span>
                 Conveyance:{' '}
                 <strong className="text-neutral-900 dark:text-neutral-100">
-                  {formatMoney(settings.payroll.conveyanceFixed)}
+                  {formatMoney(conveyance)}
                 </strong>
               </span>
               <span>
                 Estimated Gross:{' '}
                 <strong className="text-indigo-600 dark:text-indigo-400">
-                  {formatMoney(formData.basicSalary * 1.5 + settings.payroll.conveyanceFixed)}
+                  {formatMoney(grossOf(formData.basicSalary))}
                 </strong>
               </span>
             </div>
@@ -798,7 +861,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             <button
               type="button"
               onClick={() => setIsFormOpen(false)}
-              className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200 transition-colors"
+              className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors"
             >
               Cancel
             </button>
@@ -961,9 +1024,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                   <p>
                     <span className="text-neutral-400">Gross Monthly:</span>{' '}
                     <strong className="font-mono text-emerald-600 dark:text-emerald-400">
-                      {formatMoney(
-                        viewingEmployee.basicSalary * 1.5 + settings.payroll.conveyanceFixed
-                      )}
+                      {formatMoney(grossOf(viewingEmployee.basicSalary))}
                     </strong>
                   </p>
                 </div>
@@ -989,12 +1050,14 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
-                    {storageService
-                      .getAttendance()
-                      .filter((r) => r.employeeId === viewingEmployee.id)
-                      .slice(-15)
-                      .reverse()
-                      .map((rec) => (
+                    {viewingAttendance.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="py-8 text-center text-neutral-400">
+                          No attendance recorded yet.
+                        </td>
+                      </tr>
+                    )}
+                    {viewingAttendance.map((rec) => (
                         <tr key={rec.id}>
                           <td className="py-2 px-3 font-mono">{rec.date}</td>
                           <td className="py-2 px-3 font-mono">{rec.checkIn || '—'}</td>
@@ -1003,7 +1066,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                             <Badge status={rec.status} />
                           </td>
                           <td className="py-2 px-3 font-mono">
-                            {(rec.workedMinutes / 60).toFixed(1)}h
+                            {((rec.workedMinutes || 0) / 60).toFixed(1)}h
                           </td>
                         </tr>
                       ))}
@@ -1020,10 +1083,10 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                 Leave requests and approved leaves for {viewingEmployee.name}
               </p>
               <div className="space-y-2">
-                {storageService
-                  .getLeaves()
-                  .filter((l) => l.employeeId === viewingEmployee.id)
-                  .map((lv) => (
+                {viewingLeaves.length === 0 && (
+                  <p className="text-xs text-neutral-400 py-4 text-center">No leave requests yet.</p>
+                )}
+                {viewingLeaves.map((lv) => (
                     <div
                       key={lv.id}
                       className="p-3 rounded-xl border border-neutral-200 dark:border-neutral-800 flex items-center justify-between text-xs"
@@ -1058,11 +1121,10 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                 Disbursed payslips and monthly remuneration records
               </p>
               <div className="space-y-2">
-                {storageService
-                  .getPayrolls()
-                  .slice()
-                  .reverse()
-                  .map((run) => {
+                {viewingPayslips.length === 0 && (
+                  <p className="text-xs text-neutral-400 py-4 text-center">No payslips yet.</p>
+                )}
+                {viewingPayslips.map((run) => {
                     const item = run.items.find((i) => i.employeeId === viewingEmployee.id);
                     if (!item) return null;
                     return (

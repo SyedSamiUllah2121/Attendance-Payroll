@@ -11,7 +11,13 @@ export async function POST(request: Request) {
       );
     }
 
-    const { kpis, filters } = await request.json();
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+      return NextResponse.json({ error: 'Request body must be a JSON object.', fallback: true }, { status: 400 });
+    }
+    // Expected shape is { kpis, filters }; a flat object of metrics is accepted as the KPIs.
+    const { kpis: rawKpis, filters, ...rest } = body as { kpis?: unknown; filters?: unknown };
+    const kpis = rawKpis ?? rest;
     const ai = new GoogleGenAI({ apiKey });
     const prompt = `You are an expert HR and People Analytics executive consultant.
 Analyze these aggregated, anonymized workforce, attendance, and payroll KPI metrics:

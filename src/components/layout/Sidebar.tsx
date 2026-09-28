@@ -29,7 +29,9 @@ interface SidebarProps {
   onToggleCollapse: () => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
-  pendingApprovalsCount: number;
+  /** Pending requests this account may approve (already filtered by permission). */
+  pendingLeavesCount: number;
+  pendingRegularizationsCount: number;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -39,7 +41,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleCollapse,
   mobileOpen,
   onCloseMobile,
-  pendingApprovalsCount,
+  pendingLeavesCount,
+  pendingRegularizationsCount,
 }) => {
   const { user, isAdmin, can, canOpen } = useAuth();
   const { settings } = useSettings();
@@ -60,15 +63,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'attendance',
       label: 'Attendance',
       icon: Clock,
-      badge:
-        pendingApprovalsCount > 0 && (can('leaves.approve') || can('attendance.approve'))
-          ? pendingApprovalsCount
-          : undefined,
+      badge: pendingRegularizationsCount > 0 ? pendingRegularizationsCount : undefined,
     },
     {
       id: 'leaves',
       label: 'Leave Management',
       icon: CalendarCheck,
+      badge: pendingLeavesCount > 0 ? pendingLeavesCount : undefined,
     },
     {
       id: 'annual-leave',

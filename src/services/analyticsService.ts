@@ -7,7 +7,8 @@ import {
   PayrollRun,
   Shift,
 } from '../types';
-import { differenceInDays, getDay, parseISO, subDays } from 'date-fns';
+import { getDay } from 'date-fns';
+import { addDaysStr, todayStr } from '../utils/dateUtils';
 
 export interface AttendanceKPIs {
   attendanceRate: number; // percentage
@@ -189,8 +190,11 @@ export function calculateBradfordScores(
   records: AttendanceRecord[],
   employees: Employee[]
 ): BradfordScore[] {
-  // Sort records by date asc
-  const sorted = [...records].sort((a, b) => a.date.localeCompare(b.date));
+  // Only the last 6 months count, oldest first
+  const since = addDaysStr(todayStr(), -182);
+  const sorted = records
+    .filter((r) => r.date >= since)
+    .sort((a, b) => a.date.localeCompare(b.date));
   const results: BradfordScore[] = [];
 
   for (const emp of employees) {
@@ -420,7 +424,8 @@ export function calculatePayrollKPIs(payrolls: PayrollRun[]): PayrollKPIs {
 export function calculateAbsenteeismCostByDepartment(
   records: AttendanceRecord[],
   employees: Employee[],
-  workingDays = 22
+  workingDays = 22,
+  grossOf: (basicSalary: number) => number = (basic) => basic * 1.5 + 5000
 ): { department: string; cost: number; absentDays: number }[] {
   const deptCostMap: Record<string, { cost: number; absentDays: number }> = {};
 
@@ -428,10 +433,13 @@ export function calculateAbsenteeismCostByDepartment(
     if (!deptCostMap[emp.department]) {
       deptCostMap[emp.department] = { cost: 0, absentDays: 0 };
     }
-    const perDay = (emp.basicSalary * 1.5 + 5000) / workingDays;
-    const absentCount = records.filter(
-      (r) => r.employeeId === emp.id && r.status === 'Absent'
-    ).length;
+    const perDay = grossOf(emp.basicSalary) / workingDays;
+    // A half day loses half a day's pay
+    const absentCount = records.reduce(
+      (n, r) =>
+        r.employeeId !== emp.id ? n : r.status === 'Absent' ? n + 1 : r.status === 'Half Day' ? n + 0.5 : n,
+      0
+    );
 
     deptCostMap[emp.department].cost += absentCount * perDay;
     deptCostMap[emp.department].absentDays += absentCount;
@@ -467,15 +475,14 @@ export function generateAutomatedInsights(
     insights.push({
       id: 'insight-mon-late',
       title: 'Elevated Monday Lateness Pattern',
-      description: `Late arrivals peak at ${Math.round(mondayLateRate)}% on Mondays, notably in Sales & Customer Ops. Consider flexible 30-min start windows.`,
+      description: `${Math.round(mondayLateRate)}% of Monday check-ins are late. Consider a flexible 30-minute start window on Mondays.`,
       severity: 'medium',
       category: 'attendance',
-      suggestedFilter: { departments: ['Sales', 'Operations'] },
     });
   }
 
   // Insight 2: Engineering Overtime proportion
-  const latestRun = payrolls[payrolls.length - 1];
+  const latestRun = [...payrolls].sort((a, b) => b.month.localeCompare(a.month))[0];
   if (latestRun) {
     const engItems = latestRun.items.filter((i) => i.department === 'Engineering');
     const engTotalGross = engItems.reduce((acc, i) => acc + i.grossSalary, 0);
@@ -486,7 +493,7 @@ export function generateAutomatedInsights(
       insights.push({
         id: 'insight-eng-ot',
         title: 'Engineering Overtime Concentration',
-        description: `Overtime pay in Engineering accounts for ${engOTPercent}% of department gross pay, concentrated around month-end delivery cycles.`,
+        description: `Overtime pay in Engineering accounts for ${engOTPercent}% of department gross pay in ${latestRun.month}.`,
         severity: 'high',
         category: 'payroll',
         suggestedFilter: { departments: ['Engineering'] },
@@ -501,7 +508,7 @@ export function generateAutomatedInsights(
     insights.push({
       id: 'insight-bradford-high',
       title: `${highRisk.length} Employee(s) in High Absenteeism Risk Band`,
-      description: `${highRisk.map((h) => h.name).join(', ')} logged frequent short-spell absences resulting in elevated Bradford Factor scores (>125).`,
+      description: `${highRisk.map((h) => h.name).join(', ')} logged frequent short-spell absences in the last 6 months, giving Bradford Factor scores of 125 or more.`,
       severity: 'high',
       category: 'workforce',
     });
@@ -509,7 +516,7 @@ export function generateAutomatedInsights(
     insights.push({
       id: 'insight-attendance-healthy',
       title: 'Low Unplanned Absenteeism Spells',
-      description: 'Overall workforce attendance discipline is strong with 92%+ on-time consistency and low disruption across core teams.',
+      description: 'No employee is in the high Bradford Factor risk band for the last 6 months.',
       severity: 'low',
       category: 'attendance',
     });
@@ -531,13 +538,14 @@ export function generateAutomatedInsights(
   });
 
   const sortedPunctual = Object.values(punctualityMap).sort(
-    (a, b) => b.onTime / (b.present || 1) - a.onTime / (a.present || 1)
+    (a, b) => b.onTime / (b.present || 1) - a.onTime / (a.present || 1) || b.present - a.present
   );
   if (sortedPunctual.length > 0) {
+    const top = sortedPunctual[0];
     insights.push({
       id: 'insight-punctuality-stars',
       title: 'Top Punctuality Benchmark',
-      description: `${sortedPunctual[0].name} achieved a stellar 98%+ on-time check-in record throughout the review period.`,
+      description: `${top.name} arrived on time for ${Math.round((top.onTime / (top.present || 1)) * 100)}% of ${top.present} check-in${top.present === 1 ? '' : 's'}.`,
       severity: 'info',
       category: 'workforce',
     });

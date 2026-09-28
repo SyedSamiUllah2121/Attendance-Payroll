@@ -14,7 +14,11 @@ import { Employee, PayrollItem, PayrollRun } from '../types';
 import { storageService } from '../services/storageService';
 import { useAuth } from '../context/AuthContext';
 import { useSettings } from '../context/SettingsContext';
-import { numberToWords } from '../utils/payrollEngine';
+import { getLopDays, getProvidentFundRate, numberToWords, round } from '../utils/payrollEngine';
+import { currentMonthStr, toDateStr } from '../utils/dateUtils';
+
+/** An ISO timestamp as a local YYYY-MM-DD date. */
+const isoToLocalDate = (iso?: string) => (iso ? toDateStr(new Date(iso)) : '');
 
 interface PayslipsPageProps {
   initialEmployeeId?: string;
@@ -29,27 +33,43 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
   const canViewAll = can('payslips.view');
   const { formatMoney, settings } = useSettings();
 
-  const [payrolls] = useState<PayrollRun[]>(() => storageService.getPayrolls());
+  // Employees only see their own payslips, and only once payroll is locked (not a Draft).
+  // Newest month first.
+  const [payrolls] = useState<PayrollRun[]>(() =>
+    storageService
+      .getPayrolls()
+      .filter((p) => canViewAll || p.status !== 'Draft')
+      .sort((a, b) => b.month.localeCompare(a.month))
+  );
   const [employees] = useState<Employee[]>(() => storageService.getEmployees());
 
-  // Default month: latest payroll
-  const latestMonth = payrolls.length > 0 ? payrolls[payrolls.length - 1].month : '2026-09';
-  const [selectedMonth, setSelectedMonth] = useState(initialMonth || latestMonth);
+  // Default month: the requested one if it has a run, else the latest payroll
+  const latestMonth = payrolls.length > 0 ? payrolls[0].month : currentMonthStr();
+  const [selectedMonth, setSelectedMonth] = useState(
+    initialMonth && payrolls.some((p) => p.month === initialMonth) ? initialMonth : latestMonth
+  );
 
-  // Default employee
-  const defaultEmpId = isEmployee
-    ? user?.employeeId || 'EMP-001'
-    : initialEmployeeId || 'EMP-001';
-  const [selectedEmployeeId, setSelectedEmployeeId] = useState(defaultEmpId);
+  // Default employee: an employee can only ever see their own payslip
+  const ownEmpId = user?.employeeId || '';
+  const firstItemEmpId = payrolls.find((p) => p.month === selectedMonth)?.items[0]?.employeeId || '';
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState(
+    !canViewAll || isEmployee ? ownEmpId : initialEmployeeId || firstItemEmpId
+  );
+  const effectiveEmployeeId = !canViewAll || isEmployee ? ownEmpId : selectedEmployeeId;
 
   // Find run and item
-  const run = payrolls.find((p) => p.month === selectedMonth) || payrolls[payrolls.length - 1];
-  const item: PayrollItem | undefined = run?.items.find(
-    (i) => i.employeeId === selectedEmployeeId
-  );
-  const employee: Employee | undefined = employees.find(
-    (e) => e.id === selectedEmployeeId
-  );
+  const run = payrolls.find((p) => p.month === selectedMonth);
+  const item: PayrollItem | undefined = effectiveEmployeeId
+    ? run?.items.find((i) => i.employeeId === effectiveEmployeeId)
+    : undefined;
+  const employee: Employee | undefined = employees.find((e) => e.id === effectiveEmployeeId);
+  const bankName = employee?.bankName || '';
+  const accountTail = employee?.accountNumber ? employee.accountNumber.slice(-6) : '';
+  const hraPct = settings.payroll.hraPercentage ?? 40;
+  const medicalPct = settings.payroll.medicalPercentage ?? 10;
+  const pfPct = round(getProvidentFundRate(settings) * 100);
+  const lateCount = item ? item.lateDays ?? item.lateCount ?? 0 : 0;
+  const lopDays = item ? getLopDays(item.absentDays, item.unpaidLeaveDays, item.halfDays) : 0;
 
   const handlePrint = () => {
     window.print();
@@ -67,6 +87,7 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
               onChange={(e) => setSelectedMonth(e.target.value)}
               className="px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
             >
+              {payrolls.length === 0 && <option value={selectedMonth}>No payroll runs</option>}
               {payrolls.map((p) => (
                 <option key={p.month} value={p.month}>
                   {p.month} ({p.status})
@@ -75,7 +96,7 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
             </select>
           </div>
 
-          {canViewAll && (
+          {canViewAll && !isEmployee && (
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-neutral-500">Employee:</span>
               <select
@@ -83,9 +104,14 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
                 onChange={(e) => setSelectedEmployeeId(e.target.value)}
                 className="px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
               >
-                {employees.map((emp) => (
-                  <option key={emp.id} value={emp.id}>
-                    {emp.name} ({emp.id}) - {emp.department}
+                {!run?.items.some((i) => i.employeeId === selectedEmployeeId) && (
+                  <option value={selectedEmployeeId}>
+                    {employees.find((e) => e.id === selectedEmployeeId)?.name || 'Select employee'}
+                  </option>
+                )}
+                {(run?.items || []).map((i) => (
+                  <option key={i.employeeId} value={i.employeeId}>
+                    {i.employeeName} ({i.employeeId}) - {i.department}
                   </option>
                 ))}
               </select>
@@ -96,7 +122,8 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={handlePrint}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-colors"
+            disabled={!item}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-colors"
           >
             <Printer className="w-4 h-4" /> Print / Save as PDF
           </button>
@@ -104,9 +131,11 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
       </div>
 
       {/* Printable Payslip Card */}
-      {!item || !employee ? (
+      {!item ? (
         <div className="p-12 text-center text-neutral-400 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800">
-          No payslip record found for the selected month and employee.
+          {payrolls.length === 0
+            ? 'No payslips have been issued yet.'
+            : 'No payslip record found for the selected month and employee.'}
         </div>
       ) : (
         <div className="payslip-container max-w-4xl mx-auto bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 rounded-2xl border border-neutral-200 dark:border-neutral-800 p-8 shadow-sm">
@@ -133,11 +162,12 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
                 Salary Statement
               </span>
               <p className="text-sm font-bold text-neutral-900 dark:text-neutral-100 mt-2">
-                Month: {selectedMonth}
+                Month: {run?.month}
               </p>
               <p className="text-xs text-neutral-400">
-                Disbursed:{' '}
-                {run?.paidAt?.slice(0, 10) || run?.processedAt?.slice(0, 10) || '2026-09-30'}
+                {run?.status === 'Paid' && run.paidAt
+                  ? `Disbursed: ${isoToLocalDate(run.paidAt)}`
+                  : `Status: ${run?.status === 'Draft' ? 'Draft (not final)' : run?.status}`}
               </p>
             </div>
           </div>
@@ -147,32 +177,32 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
             <div>
               <span className="text-neutral-400">Employee ID</span>
               <p className="font-mono font-bold text-neutral-900 dark:text-neutral-100 mt-0.5">
-                {employee.id}
+                {item.employeeId}
               </p>
             </div>
             <div>
               <span className="text-neutral-400">Employee Name</span>
               <p className="font-semibold text-neutral-900 dark:text-neutral-100 mt-0.5">
-                {employee.name}
+                {item.employeeName}
               </p>
             </div>
             <div>
               <span className="text-neutral-400">Department</span>
               <p className="font-medium text-neutral-900 dark:text-neutral-100 mt-0.5">
-                {employee.department}
+                {item.department}
               </p>
             </div>
             <div>
               <span className="text-neutral-400">Designation</span>
               <p className="font-medium text-neutral-900 dark:text-neutral-100 mt-0.5">
-                {employee.designation}
+                {item.designation}
               </p>
             </div>
 
             <div>
               <span className="text-neutral-400">Bank & Account</span>
               <p className="font-mono text-neutral-900 dark:text-neutral-100 mt-0.5 truncate">
-                {employee.bankName} - {employee.accountNumber.slice(-6)}
+                {bankName || accountTail ? `${bankName}${accountTail ? ` - ${accountTail}` : ''}` : '—'}
               </p>
             </div>
             <div>
@@ -184,7 +214,8 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
             <div>
               <span className="text-neutral-400">Days Present / Absent</span>
               <p className="font-mono font-medium text-neutral-900 dark:text-neutral-100 mt-0.5">
-                {item.presentDays}P / {item.absentDays}A ({item.lateDays} Late)
+                {item.presentDays}P / {item.absentDays}A
+                {(item.halfDays || 0) > 0 ? ` / ${item.halfDays} Half` : ''} ({lateCount} Late)
               </p>
             </div>
             <div>
@@ -209,13 +240,13 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
                 </div>
                 <div className="flex justify-between py-1.5 px-2">
                   <span className="text-neutral-600 dark:text-neutral-400">
-                    House Rent Allowance (HRA 40%)
+                    House Rent Allowance (HRA {hraPct}%)
                   </span>
                   <span className="font-mono font-semibold">{formatMoney(item.hra)}</span>
                 </div>
                 <div className="flex justify-between py-1.5 px-2">
                   <span className="text-neutral-600 dark:text-neutral-400">
-                    Medical Allowance (10%)
+                    Medical Allowance ({medicalPct}%)
                   </span>
                   <span className="font-mono font-semibold">{formatMoney(item.medical)}</span>
                 </div>
@@ -226,20 +257,20 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
                   <span className="font-mono font-semibold">{formatMoney(item.conveyance)}</span>
                 </div>
                 {item.overtimePay > 0 && (
-                  <div className="flex justify-between py-1.5 px-2 text-indigo-600">
+                  <div className="flex justify-between py-1.5 px-2 text-indigo-600 dark:text-indigo-400">
                     <span>Overtime ({item.overtimeHours} hrs)</span>
                     <span className="font-mono font-semibold">+{formatMoney(item.overtimePay)}</span>
                   </div>
                 )}
                 {item.bonus > 0 && (
-                  <div className="flex justify-between py-1.5 px-2 text-emerald-600">
+                  <div className="flex justify-between py-1.5 px-2 text-emerald-600 dark:text-emerald-400">
                     <span>Performance Bonus</span>
                     <span className="font-mono font-semibold">+{formatMoney(item.bonus)}</span>
                   </div>
                 )}
                 <div className="flex justify-between py-2 px-2 bg-neutral-50 dark:bg-neutral-800/60 font-bold text-neutral-900 dark:text-neutral-100">
                   <span>Total Gross Earnings</span>
-                  <span className="font-mono">{formatMoney(item.grossSalary)}</span>
+                  <span className="font-mono">{formatMoney(item.totalEarnings ?? item.grossSalary)}</span>
                 </div>
               </div>
             </div>
@@ -252,35 +283,41 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
               <div className="divide-y divide-neutral-100 dark:divide-neutral-800 p-2">
                 <div className="flex justify-between py-1.5 px-2">
                   <span className="text-neutral-600 dark:text-neutral-400">Income Tax (Withholding)</span>
-                  <span className="font-mono text-rose-600">-{formatMoney(item.incomeTax)}</span>
+                  <span className="font-mono text-rose-600 dark:text-rose-400">-{formatMoney(item.incomeTax)}</span>
                 </div>
                 <div className="flex justify-between py-1.5 px-2">
                   <span className="text-neutral-600 dark:text-neutral-400">
-                    Provident Fund (Employee 5%)
+                    Provident Fund (Employee {pfPct}%)
                   </span>
-                  <span className="font-mono text-rose-600">-{formatMoney(item.providentFund)}</span>
+                  <span className="font-mono text-rose-600 dark:text-rose-400">-{formatMoney(item.providentFund)}</span>
                 </div>
+                {(item.socialSecurity || 0) > 0 && (
+                  <div className="flex justify-between py-1.5 px-2">
+                    <span className="text-neutral-600 dark:text-neutral-400">EOBI / Social Security</span>
+                    <span className="font-mono text-rose-600 dark:text-rose-400">-{formatMoney(item.socialSecurity)}</span>
+                  </div>
+                )}
                 {item.lopDeduction > 0 && (
-                  <div className="flex justify-between py-1.5 px-2 text-amber-600">
-                    <span>Loss of Pay (LOP {item.absentDays} days)</span>
+                  <div className="flex justify-between py-1.5 px-2 text-amber-600 dark:text-amber-400">
+                    <span>Loss of Pay (LOP {lopDays} days)</span>
                     <span className="font-mono">-{formatMoney(item.lopDeduction)}</span>
                   </div>
                 )}
                 {item.latePenaltyDeduction > 0 && (
-                  <div className="flex justify-between py-1.5 px-2 text-amber-600">
+                  <div className="flex justify-between py-1.5 px-2 text-amber-600 dark:text-amber-400">
                     <span>Late Arrival Penalty</span>
                     <span className="font-mono">-{formatMoney(item.latePenaltyDeduction)}</span>
                   </div>
                 )}
                 {(item.loanDeduction ?? item.loanInstallment ?? 0) > 0 && (
-                  <div className="flex justify-between py-1.5 px-2 text-indigo-600">
+                  <div className="flex justify-between py-1.5 px-2 text-indigo-600 dark:text-indigo-400">
                     <span>Loan / Advance Installment</span>
                     <span className="font-mono">
                       -{formatMoney(item.loanDeduction ?? item.loanInstallment ?? 0)}
                     </span>
                   </div>
                 )}
-                <div className="flex justify-between py-2 px-2 bg-neutral-50 dark:bg-neutral-800/60 font-bold text-rose-600">
+                <div className="flex justify-between py-2 px-2 bg-neutral-50 dark:bg-neutral-800/60 font-bold text-rose-600 dark:text-rose-400">
                   <span>Total Deductions</span>
                   <span className="font-mono">-{formatMoney(item.totalDeductions)}</span>
                 </div>
@@ -298,12 +335,14 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
                 {formatMoney(item.netSalary)}
               </p>
               <p className="text-xs text-neutral-300 italic mt-1">
-                ({numberToWords(item.netSalary)} {settings.company.currency} Only)
+                ({numberToWords(item.netSalary)})
               </p>
+              {item.adjustmentNote && (
+                <p className="text-[11px] text-amber-300 mt-1">{item.adjustmentNote}</p>
+              )}
             </div>
             <div className="text-right text-xs text-neutral-400 border-t md:border-t-0 md:border-l border-neutral-800 pt-3 md:pt-0 md:pl-6">
               <p>Employer PF Contribution: {formatMoney(item.employerPF ?? item.providentFund ?? 0)}</p>
-              <p>EOBI Contribution: {formatMoney(item.socialSecurity)}</p>
               <p className="text-[11px] text-neutral-500 mt-1">
                 Mode of Payment: Direct Bank Deposit
               </p>
@@ -325,7 +364,7 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
               <p className="font-semibold text-neutral-900 dark:text-neutral-100">
                 Employee Acknowledgement
               </p>
-              <p className="text-neutral-400 text-[11px]">{employee.name}</p>
+              <p className="text-neutral-400 text-[11px]">{item.employeeName}</p>
             </div>
           </div>
 

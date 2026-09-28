@@ -6,6 +6,14 @@ import { useSettings } from '../context/SettingsContext';
 import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
+import { currentMonthStr } from '../utils/dateUtils';
+
+/** The month after a YYYY-MM month. */
+const nextMonthStr = (month: string): string => {
+  const [y, m] = month.split('-').map(Number);
+  const d = new Date(y, m, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
 
 export const LoansPage: React.FC = () => {
   const { formatMoney } = useSettings();
@@ -13,37 +21,63 @@ export const LoansPage: React.FC = () => {
 
   const [loans, setLoans] = useState<Loan[]>(() => storageService.getLoans());
   const [employees] = useState<Employee[]>(() => storageService.getEmployees());
+  const activeEmployees = employees.filter((e) => e.status === 'Active');
 
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [form, setForm] = useState({
-    employeeId: employees[0]?.id || 'EMP-001',
-    loanType: 'Salary Advance' as LoanType,
+  const emptyForm = () => ({
+    employeeId: activeEmployees[0]?.id || '',
+    loanType: 'Advance' as LoanType,
     amount: 50000,
     monthlyInstallment: 10000,
-    startMonth: '2026-10',
-    reason: 'Medical emergency advance for family hospital bill.',
+    // Deductions start with the next payroll month by default
+    startMonth: nextMonthStr(currentMonthStr()),
+    reason: '',
   });
+
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [form, setForm] = useState(emptyForm);
 
   const reloadLoans = () => {
     setLoans(storageService.getLoans());
   };
 
+  const openModal = () => {
+    setForm(emptyForm());
+    setIsModalOpen(true);
+  };
+
   const handleCreateLoan = (e: React.FormEvent) => {
     e.preventDefault();
-    if (form.amount <= 0 || form.monthlyInstallment <= 0) {
+    if (!form.employeeId || !employees.some((emp) => emp.id === form.employeeId)) {
+      error('Select an employee', 'Choose the employee receiving this loan or advance.');
+      return;
+    }
+    if (!(form.amount > 0) || !(form.monthlyInstallment > 0)) {
       error('Invalid amounts', 'Amount and monthly installment must be greater than zero.');
       return;
     }
+    if (form.monthlyInstallment > form.amount) {
+      error('Invalid installment', 'The monthly installment cannot be more than the loan amount.');
+      return;
+    }
+    if (!/^\d{4}-\d{2}$/.test(form.startMonth)) {
+      error('Invalid start month', 'Choose the month deductions should start.');
+      return;
+    }
+    if (form.startMonth < currentMonthStr()) {
+      error('Invalid start month', 'Deductions cannot start in a month that has already passed.');
+      return;
+    }
 
+    // Last month an installment is deducted (a 1-month loan ends in its start month)
     const durationMonths = Math.ceil(form.amount / form.monthlyInstallment);
     const [y, m] = form.startMonth.split('-').map(Number);
-    const endMDate = new Date(y, m - 1 + durationMonths, 1);
+    const endMDate = new Date(y, m - 1 + durationMonths - 1, 1);
     const endMonth = `${endMDate.getFullYear()}-${String(endMDate.getMonth() + 1).padStart(2, '0')}`;
 
     const newLoan: Loan = {
       id: `loan-${Date.now()}`,
       employeeId: form.employeeId,
-      loanType: 'Loan',
+      loanType: form.loanType,
       totalAmount: form.amount,
       paidAmount: 0,
       amount: form.amount,
@@ -51,21 +85,26 @@ export const LoansPage: React.FC = () => {
       monthlyInstallment: form.monthlyInstallment,
       startMonth: form.startMonth,
       endMonth,
-      reason: form.reason,
+      reason: form.reason.trim(),
       status: 'Active',
       createdAt: new Date().toISOString(),
     };
 
     storageService.addLoan(newLoan);
-    success('Loan Approved & Disbursed', `Created loan for ${form.employeeId}`);
+    const empName = employees.find((emp) => emp.id === form.employeeId)?.name || form.employeeId;
+    success(`${form.loanType} Approved & Disbursed`, `Created ${form.loanType.toLowerCase()} for ${empName}`);
     reloadLoans();
     setIsModalOpen(false);
   };
 
-  const totalDisbursed = loans.reduce((acc, l) => acc + (l.amount ?? l.totalAmount), 0);
+  const totalDisbursed = loans.reduce((acc, l) => acc + (l.amount ?? l.totalAmount ?? 0), 0);
   const totalOutstanding = loans
     .filter((l) => l.status === 'Active')
-    .reduce((acc, l) => acc + (l.remainingAmount ?? (l.totalAmount - l.paidAmount)), 0);
+    .reduce(
+      (acc, l) =>
+        acc + Math.max(0, l.remainingAmount ?? (l.amount ?? l.totalAmount ?? 0) - (l.paidAmount || 0)),
+      0
+    );
   const totalRecovered = totalDisbursed - totalOutstanding;
 
   return (
@@ -82,7 +121,7 @@ export const LoansPage: React.FC = () => {
         </div>
 
         <button
-          onClick={() => setIsModalOpen(true)}
+          onClick={openModal}
           className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 self-start sm:self-auto transition-colors cursor-pointer"
         >
           <Plus className="w-4 h-4" /> Issue Advance / Loan
@@ -138,13 +177,23 @@ export const LoansPage: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
+              {loans.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="py-10 text-center text-neutral-400">
+                    No loans or advances issued yet.
+                  </td>
+                </tr>
+              )}
               {loans.map((loan) => {
                 const emp = employees.find((e) => e.id === loan.employeeId);
                 const loanAmt = loan.amount ?? loan.totalAmount ?? 0;
-                const loanRem = loan.remainingAmount ?? (loanAmt - (loan.paidAmount || 0));
+                const loanRem =
+                  loan.status === 'Completed'
+                    ? 0
+                    : Math.max(0, loan.remainingAmount ?? (loanAmt - (loan.paidAmount || 0)));
                 const percentRecovered =
                   loanAmt > 0
-                    ? Math.round(((loanAmt - loanRem) / loanAmt) * 100)
+                    ? Math.min(100, Math.max(0, Math.round(((loanAmt - loanRem) / loanAmt) * 100)))
                     : 100;
                 return (
                   <tr
@@ -156,7 +205,8 @@ export const LoansPage: React.FC = () => {
                         {emp?.name || loan.employeeId}
                       </p>
                       <span className="text-[11px] text-neutral-400 font-mono">
-                        {loan.employeeId} · {emp?.department}
+                        {loan.employeeId}
+                        {emp?.department ? ` · ${emp.department}` : ''} · {loan.loanType}
                       </span>
                     </td>
                     <td className="py-3.5 px-4 font-mono font-medium text-neutral-900 dark:text-neutral-100">
@@ -176,7 +226,7 @@ export const LoansPage: React.FC = () => {
                     <td className="py-3.5 px-4 font-mono text-neutral-700 dark:text-neutral-300">
                       {formatMoney(loan.monthlyInstallment)} / mo
                     </td>
-                    <td className="py-3.5 px-4 font-mono text-neutral-500">
+                    <td className="py-3.5 px-4 font-mono text-neutral-500 dark:text-neutral-400">
                       {loan.startMonth} {loan.endMonth ? `to ${loan.endMonth}` : ''}
                     </td>
                     <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300 max-w-xs">
@@ -212,11 +262,25 @@ export const LoansPage: React.FC = () => {
                 onChange={(e) => setForm({ ...form, employeeId: e.target.value })}
                 className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
               >
-                {employees.map((emp) => (
+                {activeEmployees.map((emp) => (
                   <option key={emp.id} value={emp.id}>
                     {emp.name} ({emp.id}) - Basic: {formatMoney(emp.basicSalary)}
                   </option>
                 ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
+                Type *
+              </label>
+              <select
+                value={form.loanType}
+                onChange={(e) => setForm({ ...form, loanType: e.target.value as LoanType })}
+                className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
+              >
+                <option value="Advance">Salary Advance</option>
+                <option value="Loan">Loan</option>
               </select>
             </div>
 
@@ -266,6 +330,7 @@ export const LoansPage: React.FC = () => {
               <input
                 type="month"
                 required
+                min={currentMonthStr()}
                 value={form.startMonth}
                 onChange={(e) => setForm({ ...form, startMonth: e.target.value })}
                 className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
@@ -290,7 +355,7 @@ export const LoansPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsModalOpen(false)}
-                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200"
+                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700"
               >
                 Cancel
               </button>

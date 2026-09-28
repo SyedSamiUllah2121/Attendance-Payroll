@@ -15,17 +15,22 @@ import { useSettings } from '../context/SettingsContext';
 import { computeAnnualLeave, getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
 import { useNotification } from '../context/NotificationContext';
 import { useAuth } from '../context/AuthContext';
+import { currentMonthStr } from '../utils/dateUtils';
+
+/**
+ * One CSV field: quoted when it holds a comma, quote or line break (quotes doubled). Text
+ * starting with = + - @ is prefixed with ' so spreadsheets don't run it as a formula.
+ */
+const csvField = (value: string | number | undefined | null): string => {
+  let s = value === undefined || value === null ? '' : String(value);
+  if (typeof value === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
 
 export const ReportsPage: React.FC = () => {
   const { formatMoney, settings } = useSettings();
   const leavePolicy = getAnnualLeavePolicy(settings);
-  const leaveYear = new Date().getFullYear();
-  // Annual leave is earned monthly, so each employee's quota is what they have earned this year.
-  const annualFor = (emp: Employee) => {
-    const s = computeAnnualLeave(emp, leaves, leavePolicy, leaveYear);
-    return { quota: s.carriedForward + s.accrued, used: s.used };
-  };
-  const { success } = useNotification();
+  const { success, warning } = useNotification();
   const { can } = useAuth();
   // Salary-related reports are limited to roles with payroll access
   const canSeePay = can('payroll.manage');
@@ -33,30 +38,79 @@ export const ReportsPage: React.FC = () => {
   const [selectedReport, setSelectedReport] = useState<
     'attendance' | 'payroll' | 'leaves' | 'taxes' | 'loans'
   >('attendance');
-  const [selectedMonth, setSelectedMonth] = useState('2026-09');
+  const [selectedMonth, setSelectedMonth] = useState(() => currentMonthStr());
+  // Leave balances are for the calendar year of the selected month
+  const leaveYear = Number(selectedMonth.slice(0, 4)) || new Date().getFullYear();
 
-  const employees = storageService.getEmployees();
+  const allEmployees = storageService.getEmployees();
   const attendance = storageService.getAttendance().filter((r) => r.date.startsWith(selectedMonth));
   const leaves = storageService.getLeaves();
   const payrolls = storageService.getPayrolls();
   const loans = storageService.getLoans();
 
-  const currentPayroll = payrolls.find((p) => p.month === selectedMonth) || payrolls[payrolls.length - 1];
+  // Active staff, plus anyone deactivated who still has attendance in the selected month
+  const employees = allEmployees.filter(
+    (e) => e.status === 'Active' || attendance.some((r) => r.employeeId === e.id)
+  );
+
+  // Only the run for the selected month: never show another month's payroll under this heading
+  const currentPayroll = payrolls.find((p) => p.month === selectedMonth);
+
+  // Annual leave is earned monthly, so each employee's quota is what they have earned this year.
+  const annualFor = (emp: Employee) => {
+    const s = computeAnnualLeave(emp, leaves, leavePolicy, leaveYear);
+    return { quota: s.carriedForward + s.accrued, used: s.used };
+  };
+  // Approved Sick / Casual days taken in the leave year
+  const usedInYear = (empId: string, type: 'Sick' | 'Casual') =>
+    leaves
+      .filter(
+        (l) =>
+          l.employeeId === empId &&
+          l.status === 'Approved' &&
+          l.leaveType === type &&
+          l.fromDate.startsWith(String(leaveYear))
+      )
+      .reduce((a, b) => a + b.daysCount, 0);
+
+  // Applicable slab label for an annual income, from the configured tax slabs
+  const slabLabel = (annual: number) => {
+    const slabs = [...(settings.payroll.taxSlabs || [])].sort((a, b) => a.minIncome - b.minIncome);
+    const slab =
+      slabs.find((s) => annual > s.minIncome && (s.maxIncome === null || annual <= s.maxIncome)) ||
+      (slabs.length && annual > slabs[slabs.length - 1].minIncome ? slabs[slabs.length - 1] : undefined);
+    if (!slab || slab.taxRate === 0) return 'Exempt';
+    const rate = `${Math.round(slab.taxRate * 1000) / 10}% of excess over ${formatMoney(slab.minIncome)}`;
+    return slab.baseTax > 0 ? `${formatMoney(slab.baseTax)} + ${rate}` : rate;
+  };
 
   // Export CSV generator
   const downloadCSV = (filename: string, headers: string[], rows: (string | number)[][]) => {
-    const csvContent =
-      'data:text/csv;charset=utf-8,' +
-      [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-    const encoded = encodeURI(csvContent);
+    if (rows.length === 0) {
+      warning('Nothing to Export', 'This report has no rows for the selected period.');
+      return;
+    }
+    const csvContent = [headers, ...rows].map((row) => row.map(csvField).join(',')).join('\r\n');
+    // BOM so Excel reads the file as UTF-8
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encoded);
-    link.setAttribute('download', `${filename}.csv`);
+    link.href = url;
+    link.download = `${filename}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
     success('Report Exported', `Downloaded ${filename}.csv`);
   };
+
+  const noPayrollRow = (colSpan: number) => (
+    <tr>
+      <td colSpan={colSpan} className="py-10 text-center text-neutral-400 font-sans">
+        No payroll run for {selectedMonth}.
+      </td>
+    </tr>
+  );
 
   const handlePrint = () => {
     window.print();
@@ -78,7 +132,7 @@ export const ReportsPage: React.FC = () => {
           <input
             type="month"
             value={selectedMonth}
-            onChange={(e) => setSelectedMonth(e.target.value)}
+            onChange={(e) => e.target.value && setSelectedMonth(e.target.value)}
             className="px-3 py-1.5 text-xs bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
           />
           <button
@@ -129,7 +183,7 @@ export const ReportsPage: React.FC = () => {
             </div>
             <button
               onClick={() => {
-                const headers = ['Employee ID', 'Name', 'Department', 'Present', 'Late', 'Absent', 'HalfDay', 'Leave', 'OT Hours'];
+                const headers = ['Employee ID', 'Name', 'Department', 'Present', 'Late', 'Absent', 'Half Day', 'Leave', 'OT Hours'];
                 const rows = employees.map((emp) => {
                   const empRecs = attendance.filter((r) => r.employeeId === emp.id);
                   const p = empRecs.filter((r) => r.status === 'Present').length;
@@ -138,7 +192,7 @@ export const ReportsPage: React.FC = () => {
                   const hd = empRecs.filter((r) => r.status === 'Half Day').length;
                   const lv = empRecs.filter((r) => r.status === 'On Leave').length;
                   const ot = (empRecs.reduce((acc, r) => acc + (r.overtimeMinutes || 0), 0) / 60).toFixed(1);
-                  return [emp.id, `"${emp.name}"`, emp.department, p, l, a, hd, lv, ot];
+                  return [emp.id, emp.name, emp.department, p, l, a, hd, lv, ot];
                 });
                 downloadCSV(`WorkPulse_Attendance_${selectedMonth}`, headers, rows);
               }}
@@ -163,6 +217,13 @@ export const ReportsPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800 font-mono">
+                {employees.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="py-10 text-center text-neutral-400 font-sans">
+                      No employees to report.
+                    </td>
+                  </tr>
+                )}
                 {employees.map((emp) => {
                   const empRecs = attendance.filter((r) => r.employeeId === emp.id);
                   const p = empRecs.filter((r) => r.status === 'Present').length;
@@ -205,24 +266,28 @@ export const ReportsPage: React.FC = () => {
                 Payroll Reconciliation Statement ({selectedMonth})
               </h3>
               <p className="text-xs text-neutral-500">
-                Status: {currentPayroll?.status || 'Draft'} · Total Disbursed:{' '}
-                {formatMoney(currentPayroll?.totalNet || 0)}
+                {currentPayroll ? (
+                  <>
+                    Status: {currentPayroll.status} · Total Net Pay: {formatMoney(currentPayroll.totalNet)}
+                  </>
+                ) : (
+                  'No payroll has been run for this month yet'
+                )}
               </p>
             </div>
             <button
               onClick={() => {
-                if (!currentPayroll) return;
-                const headers = ['Employee ID', 'Name', 'Department', 'Basic', 'Gross', 'Tax', 'PF', 'LOP', 'Net'];
-                const rows = currentPayroll.items.map((i) => [
+                const headers = ['Employee ID', 'Name', 'Department', 'Basic', 'Gross', 'Tax', 'PF', 'LOP / Late', 'Net'];
+                const rows = (currentPayroll?.items || []).map((i) => [
                   i.employeeId,
-                  `"${i.employeeName}"`,
+                  i.employeeName,
                   i.department,
-                  i.basicSalary,
-                  i.grossSalary,
-                  i.incomeTax,
-                  i.providentFund,
-                  i.lopDeduction,
-                  i.netSalary,
+                  Math.round(i.basicSalary),
+                  Math.round(i.grossSalary),
+                  Math.round(i.incomeTax),
+                  Math.round(i.providentFund),
+                  Math.round(i.lopDeduction + (i.latePenaltyDeduction || 0)),
+                  Math.round(i.netSalary),
                 ]);
                 downloadCSV(`WorkPulse_Payroll_${selectedMonth}`, headers, rows);
               }}
@@ -248,6 +313,7 @@ export const ReportsPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                {!currentPayroll && noPayrollRow(7)}
                 {(currentPayroll?.items || []).map((i) => (
                   <tr key={i.employeeId} className="hover:bg-neutral-50 dark:hover:bg-neutral-800/40">
                     <td className="py-3 px-4 font-sans font-medium text-neutral-900 dark:text-neutral-100">
@@ -259,7 +325,7 @@ export const ReportsPage: React.FC = () => {
                     <td className="py-3 px-4 text-rose-600">-{formatMoney(i.incomeTax)}</td>
                     <td className="py-3 px-4 text-rose-600">-{formatMoney(i.providentFund)}</td>
                     <td className="py-3 px-4 text-amber-600">
-                      -{formatMoney(i.lopDeduction + i.latePenaltyDeduction)}
+                      -{formatMoney(i.lopDeduction + (i.latePenaltyDeduction || 0))}
                     </td>
                     <td className="py-3 px-4 text-right font-bold text-emerald-600 text-sm">
                       {formatMoney(i.netSalary)}
@@ -281,23 +347,22 @@ export const ReportsPage: React.FC = () => {
                 Annual Leave Quotas & Entitlement Register
               </h3>
               <p className="text-xs text-neutral-500">
-                YTD consumption of Annual, Sick, and Casual leave allowances
+                {leaveYear} consumption of Annual, Sick, and Casual leave allowances
               </p>
             </div>
             <button
               onClick={() => {
                 const sickQuota = settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10;
                 const casQuota = settings.leaves?.casual ?? settings.leaveQuotas?.Casual ?? 8;
-                const headers = ['Employee ID', 'Name', 'Annual Used', 'Sick Used', 'Casual Used', 'Total Remaining'];
+                const headers = ['Employee ID', 'Name', 'Department', 'Annual Used', 'Sick Used', 'Casual Used', 'Total Remaining'];
                 const rows = employees.map((emp) => {
-                  const empLeaves = leaves.filter((l) => l.employeeId === emp.id && l.status === 'Approved');
                   const { quota: annQuota, used: ann } = annualFor(emp);
-                  const sick = empLeaves.filter((l) => l.leaveType === 'Sick').reduce((a, b) => a + b.daysCount, 0);
-                  const cas = empLeaves.filter((l) => l.leaveType === 'Casual').reduce((a, b) => a + b.daysCount, 0);
+                  const sick = usedInYear(emp.id, 'Sick');
+                  const cas = usedInYear(emp.id, 'Casual');
                   const totalRem = annQuota + sickQuota + casQuota - (ann + sick + cas);
-                  return [emp.id, `"${emp.name}"`, ann, sick, cas, Math.max(0, totalRem)];
+                  return [emp.id, emp.name, emp.department, ann, sick, cas, Math.max(0, Math.round(totalRem * 10) / 10)];
                 });
-                downloadCSV('WorkPulse_Leave_Balances', headers, rows);
+                downloadCSV(`WorkPulse_Leave_Balances_${leaveYear}`, headers, rows);
               }}
               className="px-3 py-1.5 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-200 rounded-lg text-xs font-semibold flex items-center gap-1.5"
             >
@@ -329,10 +394,9 @@ export const ReportsPage: React.FC = () => {
                 {employees.map((emp) => {
                   const sickQuota = settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10;
                   const casQuota = settings.leaves?.casual ?? settings.leaveQuotas?.Casual ?? 8;
-                  const empLeaves = leaves.filter((l) => l.employeeId === emp.id && l.status === 'Approved');
                   const { quota: annQuota, used: ann } = annualFor(emp);
-                  const sick = empLeaves.filter((l) => l.leaveType === 'Sick').reduce((a, b) => a + b.daysCount, 0);
-                  const cas = empLeaves.filter((l) => l.leaveType === 'Casual').reduce((a, b) => a + b.daysCount, 0);
+                  const sick = usedInYear(emp.id, 'Sick');
+                  const cas = usedInYear(emp.id, 'Casual');
                   const totalRem = annQuota + sickQuota + casQuota - (ann + sick + cas);
 
                   return (
@@ -354,7 +418,7 @@ export const ReportsPage: React.FC = () => {
                         <span className="text-amber-600 font-bold">{cas}</span> used
                       </td>
                       <td className="py-3 px-4 text-right font-bold text-emerald-600">
-                        {Math.max(0, totalRem)} days
+                        {Math.max(0, Math.round(totalRem * 10) / 10)} days
                       </td>
                     </tr>
                   );
@@ -379,14 +443,14 @@ export const ReportsPage: React.FC = () => {
             </div>
             <button
               onClick={() => {
-                if (!currentPayroll) return;
-                const headers = ['Employee ID', 'Name', 'Gross Income', 'Annual Taxable (Est)', 'Monthly Tax Withheld'];
-                const rows = currentPayroll.items.map((i) => [
+                const headers = ['Employee ID', 'Name', 'Gross Income', 'Annual Taxable (Est)', 'Applicable Slab', 'Monthly Tax Withheld'];
+                const rows = (currentPayroll?.items || []).map((i) => [
                   i.employeeId,
-                  `"${i.employeeName}"`,
-                  i.grossSalary,
-                  i.grossSalary * 12,
-                  i.incomeTax,
+                  i.employeeName,
+                  Math.round(i.grossSalary),
+                  Math.round(i.grossSalary * 12),
+                  slabLabel(i.grossSalary * 12),
+                  Math.round(i.incomeTax),
                 ]);
                 downloadCSV(`WorkPulse_Tax_Schedule_${selectedMonth}`, headers, rows);
               }}
@@ -410,13 +474,10 @@ export const ReportsPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                {!currentPayroll && noPayrollRow(5)}
                 {(currentPayroll?.items || []).map((i) => {
                   const ann = i.grossSalary * 12;
-                  let slab = 'Exempt (Below 600k)';
-                  if (ann > 3200000) slab = '35% + 435,000';
-                  else if (ann > 2400000) slab = '25% + 235,000';
-                  else if (ann > 1200000) slab = '15% + 55,000';
-                  else if (ann > 600000) slab = '5% on excess of 600k';
+                  const slab = slabLabel(ann);
 
                   return (
                     <tr key={i.employeeId} className="hover:bg-neutral-50 dark:hover:bg-neutral-800/40">
@@ -453,14 +514,21 @@ export const ReportsPage: React.FC = () => {
             </div>
             <button
               onClick={() => {
-                const headers = ['Employee ID', 'Disbursed', 'Remaining', 'Monthly Installment', 'Status'];
-                const rows = loans.map((l) => [
-                  l.employeeId,
-                  l.amount ?? l.totalAmount ?? 0,
-                  l.remainingAmount ?? (l.totalAmount - (l.paidAmount || 0)),
-                  l.monthlyInstallment,
-                  l.status,
-                ]);
+                const headers = ['Employee ID', 'Name', 'Type', 'Disbursed', 'Recovered', 'Remaining', 'Monthly Installment', 'Status'];
+                const rows = loans.map((l) => {
+                  const lAmt = l.amount ?? l.totalAmount ?? 0;
+                  const lRem = l.remainingAmount ?? (lAmt - (l.paidAmount || 0));
+                  return [
+                    l.employeeId,
+                    allEmployees.find((e) => e.id === l.employeeId)?.name || '',
+                    l.loanType,
+                    lAmt,
+                    lAmt - lRem,
+                    lRem,
+                    l.monthlyInstallment,
+                    l.status,
+                  ];
+                });
                 downloadCSV('WorkPulse_Loan_Ledger', headers, rows);
               }}
               className="px-3 py-1.5 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-200 rounded-lg text-xs font-semibold flex items-center gap-1.5"
@@ -477,14 +545,22 @@ export const ReportsPage: React.FC = () => {
                   <th className="py-3 px-4">Original Advance</th>
                   <th className="py-3 px-4">Recovered to Date</th>
                   <th className="py-3 px-4">Monthly Installment</th>
+                  <th className="py-3 px-4 font-sans">Status</th>
                   <th className="py-3 px-4 text-right font-bold text-amber-600 font-sans">
                     Outstanding Balance
                   </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                {loans.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="py-10 text-center text-neutral-400 font-sans">
+                      No loans or advances recorded.
+                    </td>
+                  </tr>
+                )}
                 {loans.map((l) => {
-                  const emp = employees.find((e) => e.id === l.employeeId);
+                  const emp = allEmployees.find((e) => e.id === l.employeeId);
                   const lAmt = l.amount ?? l.totalAmount ?? 0;
                   const lRem = l.remainingAmount ?? (lAmt - (l.paidAmount || 0));
                   const recovered = lAmt - lRem;
@@ -498,6 +574,7 @@ export const ReportsPage: React.FC = () => {
                       <td className="py-3 px-4">{formatMoney(lAmt)}</td>
                       <td className="py-3 px-4 text-emerald-600">{formatMoney(recovered)}</td>
                       <td className="py-3 px-4">{formatMoney(l.monthlyInstallment)} / mo</td>
+                      <td className="py-3 px-4 font-sans text-neutral-500 dark:text-neutral-400">{l.status}</td>
                       <td className="py-3 px-4 text-right font-bold text-amber-600">
                         {formatMoney(lRem)}
                       </td>

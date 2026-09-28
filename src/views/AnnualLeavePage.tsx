@@ -49,7 +49,7 @@ const StatCard: React.FC<{
       <Icon className={`w-4 h-4 ${accent}`} />
     </div>
     <div className={`text-2xl font-bold font-mono mt-1 ${accent}`}>
-      {/^-?d+(.d+)?$/.test(value) ? <AnimatedNumber value={Number(value)} /> : value}
+      {/^-?\d+(\.\d+)?$/.test(value) ? <AnimatedNumber value={Number(value)} /> : value}
     </div>
     <p className="text-[11px] text-neutral-400 mt-1">{hint}</p>
   </div>
@@ -490,7 +490,7 @@ export const AnnualLeavePage: React.FC = () => {
                     <td className="px-4 py-3 text-right font-mono text-amber-600 dark:text-amber-400">
                       {fmt(s.pending)}
                     </td>
-                    <td className={`px-4 py-3 text-right font-mono font-bold ${s.available < 0 ? 'text-rose-600' : 'text-indigo-600 dark:text-indigo-400'}`}>
+                    <td className={`px-4 py-3 text-right font-mono font-bold ${s.available < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-indigo-600 dark:text-indigo-400'}`}>
                       {fmt(s.available)}
                     </td>
                     <td className="px-4 py-3 min-w-[140px]">

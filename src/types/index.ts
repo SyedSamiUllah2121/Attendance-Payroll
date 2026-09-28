@@ -91,6 +91,8 @@ export interface AttendanceRecord {
   isEarlyDeparture?: boolean;
   notes?: string;
   modifiedBy?: string;
+  /** Filled in by the system for a day nobody marked (absent, weekend, holiday or leave). */
+  autoMarked?: boolean;
 }
 
 export type LeaveType = 'Annual' | 'Sick' | 'Casual' | 'Unpaid';

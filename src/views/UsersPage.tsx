@@ -172,27 +172,38 @@ export const UsersPage: React.FC = () => {
     if (!form) return;
     const name = form.name.trim();
     const email = form.email.trim().toLowerCase();
-    const existing = form.id ? accounts.find((a) => a.id === form.id) : undefined;
+    // Sign-in trims the password, so store it trimmed too
+    const password = form.password.trim();
+    // Validate against stored accounts, not this page's copy
+    const stored = storageService.getUsers();
+    const existing = form.id ? stored.find((a) => a.id === form.id) : undefined;
+    if (form.id && !existing) return error('Account not found', 'This account no longer exists.');
 
     if (!name) return error('Name required', 'Enter the person’s name.');
     // Sign-in id: an email address or a plain username (no spaces)
     if (!email || /\s/.test(email) || (email.includes('@') && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))
       return error('Invalid sign-in', 'Enter a valid email address or a username without spaces.');
-    if (accounts.some((a) => a.email.toLowerCase() === email && a.id !== form.id))
+    if (stored.some((a) => a.email.toLowerCase() === email && a.id !== form.id))
       return error('Email in use', `Another account already uses ${email}.`);
-    if (!existing && form.password.length < 6)
+    if (!existing && password.length < 6)
       return error('Password too short', 'Use at least 6 characters.');
-    if (existing && form.password && form.password.length < 6)
+    if (existing && password && password.length < 6)
       return error('Password too short', 'Use at least 6 characters, or leave it blank to keep the current one.');
     if (form.role === 'employee' && !form.employeeId)
       return error('Employee record required', 'Employee accounts must be linked to an employee record.');
-    if (form.employeeId && accounts.some((a) => a.employeeId === form.employeeId && a.id !== form.id)) {
-      const other = accounts.find((a) => a.employeeId === form.employeeId && a.id !== form.id);
+    if (form.employeeId && stored.some((a) => a.employeeId === form.employeeId && a.id !== form.id)) {
+      const other = stored.find((a) => a.employeeId === form.employeeId && a.id !== form.id);
       return error('Already linked', `That employee is already linked to ${other?.email}.`);
     }
     if (existing && existing.id === user?.id && form.role !== existing.role)
       return error('Not allowed', 'You cannot change your own role.');
-    if (existing && isLastManager(existing) && form.role !== 'manager')
+    if (
+      existing &&
+      existing.role === 'manager' &&
+      existing.status === 'Active' &&
+      form.role !== 'manager' &&
+      stored.filter((a) => a.role === 'manager' && a.status === 'Active').length <= 1
+    )
       return error('Head Manager required', 'Keep at least one active Head Manager.');
 
     const account: UserAccount = {
@@ -200,7 +211,7 @@ export const UsersPage: React.FC = () => {
       id: existing?.id || `user-${Date.now()}`,
       name,
       email,
-      password: form.password || existing?.password || '',
+      password: password || existing?.password || '',
       role: form.role,
       employeeId: form.employeeId || undefined,
       designation: form.designation.trim() || ROLE_LABELS[form.role],
@@ -208,8 +219,8 @@ export const UsersPage: React.FC = () => {
     };
 
     const updated = existing
-      ? accounts.map((a) => (a.id === account.id ? account : a))
-      : [...accounts, account];
+      ? stored.map((a) => (a.id === account.id ? account : a))
+      : [...stored, account];
     storageService.saveUsers(updated);
     if (account.id === user?.id) refreshUser();
     success(
@@ -227,7 +238,7 @@ export const UsersPage: React.FC = () => {
     if (a.status === 'Active' && isLastManager(a))
       return error('Head Manager required', 'Keep at least one active Head Manager.');
     const next: UserAccount['status'] = a.status === 'Active' ? 'Disabled' : 'Active';
-    storageService.saveUsers(accounts.map((x) => (x.id === a.id ? { ...x, status: next } : x)));
+    storageService.saveUsers(storageService.getUsers().map((x) => (x.id === a.id ? { ...x, status: next } : x)));
     success(
       next === 'Active' ? 'Account Enabled' : 'Account Disabled',
       next === 'Active' ? `${a.name} can sign in again.` : `${a.name} can no longer sign in.`
@@ -243,7 +254,7 @@ export const UsersPage: React.FC = () => {
 
   const confirmDelete = () => {
     if (!deleting) return;
-    storageService.saveUsers(accounts.filter((a) => a.id !== deleting.id));
+    storageService.saveUsers(storageService.getUsers().filter((a) => a.id !== deleting.id));
     success('Account Deleted', `${deleting.name}'s account was removed. Their employee record is unchanged.`);
     reload();
     setDeleting(null);
@@ -404,7 +415,7 @@ export const UsersPage: React.FC = () => {
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2.5">
                         <div className="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold shrink-0">
-                          {a.name[0]}
+                          {(a.name.trim()[0] || '?').toUpperCase()}
                         </div>
                         <div>
                           <p className="font-semibold text-neutral-900 dark:text-neutral-100">
@@ -531,6 +542,7 @@ export const UsersPage: React.FC = () => {
                   return (
                     <option key={emp.id} value={emp.id} disabled={!!takenBy}>
                       {emp.name} ({emp.id}) · {emp.department}
+                      {emp.status !== 'Active' ? ' (inactive)' : ''}
                       {takenBy ? ' — already has an account' : ''}
                     </option>
                   );

@@ -14,10 +14,15 @@ const REMEMBER_KEY = 'workpulse_remember';
 /** Seeded accounts offered as one-click demo sign-ins (only while they exist and are active). */
 export const DEMO_ACCOUNT_IDS = defaultUserAccounts.map((a) => a.id);
 
+/** An account can sign in when it is active and its linked employee (if any) hasn't been deactivated. */
+const canSignIn = (a: UserAccount): boolean =>
+  a.status === 'Active' &&
+  (!a.employeeId || storageService.getEmployeeById(a.employeeId)?.status !== 'Inactive');
+
 export const getDemoAccounts = (): UserAccount[] =>
   storageService
     .getUsers()
-    .filter((a) => DEMO_ACCOUNT_IDS.includes(a.id) && a.status === 'Active');
+    .filter((a) => DEMO_ACCOUNT_IDS.includes(a.id) && canSignIn(a));
 
 const toSessionUser = (a: UserAccount): User => ({
   id: a.id,
@@ -63,7 +68,7 @@ const restoreSession = (): User | null => {
     const account =
       accounts.find((a) => a.id === parsed.id) ||
       accounts.find((a) => a.email.toLowerCase() === parsed.email?.toLowerCase());
-    return account && account.status === 'Active' ? toSessionUser(account) : null;
+    return account && canSignIn(account) ? toSessionUser(account) : null;
   } catch {
     return null;
   }
@@ -108,7 +113,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         (a) => a.email.toLowerCase() === email.toLowerCase().trim() && a.password === pass.trim()
       );
     if (!account) return { ok: false, reason: 'invalid' };
-    if (account.status !== 'Active') return { ok: false, reason: 'disabled' };
+    if (!canSignIn(account)) return { ok: false, reason: 'disabled' };
     setRemember(keepSignedIn);
     signIn(account);
     return { ok: true };

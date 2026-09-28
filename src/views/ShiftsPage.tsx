@@ -108,6 +108,18 @@ export const ShiftsPage: React.FC = () => {
       error('Working days required', 'Select at least one working day.');
       return;
     }
+    const paidHours = shiftHours(editingShift);
+    if (paidHours <= 0) {
+      error('Invalid break', 'The break cannot be as long as the shift itself.');
+      return;
+    }
+    if (editingShift.halfDayThresholdHours > paidHours) {
+      error(
+        'Invalid half-day threshold',
+        `The half-day threshold (${editingShift.halfDayThresholdHours} hrs) cannot exceed the paid shift hours (${paidHours.toFixed(1)} hrs).`
+      );
+      return;
+    }
     if (shifts.some((s) => s.name.toLowerCase() === name.toLowerCase() && s.id !== editingShift.id)) {
       error('Duplicate name', `A shift called "${name}" already exists.`);
       return;
@@ -140,7 +152,7 @@ export const ShiftsPage: React.FC = () => {
   const handleConfirmDelete = () => {
     if (!deletingShift) return;
     const affected = assignedTo(deletingShift.id);
-    if (affected.length && !reassignTo) {
+    if (affected.length && (!reassignTo || reassignTo === deletingShift.id || !shifts.some((s) => s.id === reassignTo))) {
       error('Choose a shift', 'Select where to move the assigned employees.');
       return;
     }
@@ -268,7 +280,7 @@ export const ShiftsPage: React.FC = () => {
 
               <div className="mt-4 pt-3 border-t border-neutral-100 dark:border-neutral-800 flex items-center justify-between text-xs text-neutral-400">
                 <span className="font-mono text-[11px]">{shift.id}</span>
-                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600">
+                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
                   Active Shift
                 </span>
               </div>

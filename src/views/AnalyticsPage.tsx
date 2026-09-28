@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   BarChart3,
   Calendar,
@@ -66,6 +66,64 @@ import {
   BradfordScore,
 } from '../services/analyticsService';
 import { Badge } from '../components/common/Badge';
+import {
+  addDaysStr,
+  currentMonthStr,
+  monthEndStr,
+  monthStartStr,
+  parseDateStr,
+  prevMonthStr,
+  todayStr,
+} from '../utils/dateUtils';
+
+/** Start and end (YYYY-MM-DD) of a period preset, counted back from today. */
+const presetRange = (preset: string): { startDate: string; endDate: string } => {
+  const today = todayStr();
+  switch (preset) {
+    case 'last-7':
+      return { startDate: addDaysStr(today, -6), endDate: today };
+    case 'last-30':
+      return { startDate: addDaysStr(today, -29), endDate: today };
+    case 'last-month': {
+      const prev = prevMonthStr(currentMonthStr());
+      return { startDate: `${prev}-01`, endDate: monthEndStr(prev) };
+    }
+    case 'last-3-months':
+      return { startDate: `${prevMonthStr(prevMonthStr(currentMonthStr()))}-01`, endDate: today };
+    case 'this-month':
+    default:
+      return { startDate: monthStartStr(today), endDate: today };
+  }
+};
+
+/** The equally long period right before [startDate, endDate]. */
+const previousRange = (startDate: string, endDate: string) => {
+  const days =
+    Math.round((parseDateStr(endDate).getTime() - parseDateStr(startDate).getTime()) / 86400000) + 1;
+  return { startDate: addDaysStr(startDate, -Math.max(1, days)), endDate: addDaysStr(startDate, -1) };
+};
+
+/** "+1.4 pts vs prev" change label, coloured by whether the change is good. */
+const DeltaLabel: React.FC<{ current: number; previous: number | null; higherIsBetter: boolean }> = ({
+  current,
+  previous,
+  higherIsBetter,
+}) => {
+  if (previous === null) return <span className="text-[10px] text-neutral-400">No prior period data</span>;
+  const diff = Math.round((current - previous) * 10) / 10;
+  if (diff === 0) return <span className="text-[10px] text-neutral-400">No change vs prev</span>;
+  const good = higherIsBetter ? diff > 0 : diff < 0;
+  return (
+    <span
+      className={`text-[10px] font-medium ${
+        good ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+      }`}
+    >
+      {diff > 0 ? '▲ +' : '▼ '}
+      {diff} pts vs prev
+    </span>
+  );
+};
 
 export const AnalyticsPage: React.FC = () => {
   const { user, can } = useAuth();
@@ -85,50 +143,38 @@ export const AnalyticsPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'attendance' | 'payroll' | 'workforce'>('attendance');
 
   // Filters State
-  const [filters, setFilters] = useState<AnalyticsFilterState>({
+  const [filters, setFilters] = useState<AnalyticsFilterState>(() => ({
     datePreset: 'this-month',
-    startDate: '2026-09-01',
-    endDate: '2026-09-23',
+    ...presetRange('this-month'),
     departments: [],
     employmentType: '',
     shiftId: '',
-    employeeId: isEmployee ? user?.employeeId || 'EMP-001' : '',
-  });
+    employeeId: isEmployee ? user?.employeeId || '' : '',
+  }));
 
   // AI Briefing State
   const [aiSummary, setAiSummary] = useState<string | null>(null);
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
 
-  // Departments list
-  const departments = ['Engineering', 'Human Resources', 'Finance', 'Sales', 'Operations'];
+  // Departments list: every department that has employees
+  const departments = useMemo(
+    () => Array.from(new Set(employees.map((e) => e.department).filter(Boolean))).sort(),
+    [employees]
+  );
+
+  // Gross pay for a basic salary, built from the same components as the payroll engine
+  const grossOf = (basic: number) =>
+    basic +
+    (basic * (settings.payroll.hraPercentage ?? 40)) / 100 +
+    (basic * (settings.payroll.medicalPercentage ?? 10)) / 100 +
+    (settings.payroll.conveyanceFixed ?? 5000);
 
   // Handle Preset Changes
   const handlePresetChange = (preset: string) => {
-    let s = '2026-09-01';
-    let e = '2026-09-23';
-
-    if (preset === 'last-7') {
-      s = '2026-09-16';
-      e = '2026-09-23';
-    } else if (preset === 'last-30') {
-      s = '2026-08-25';
-      e = '2026-09-23';
-    } else if (preset === 'this-month') {
-      s = '2026-09-01';
-      e = '2026-09-23';
-    } else if (preset === 'last-month') {
-      s = '2026-08-01';
-      e = '2026-08-31';
-    } else if (preset === 'last-3-months') {
-      s = '2026-06-01';
-      e = '2026-09-23';
-    }
-
     setFilters((prev) => ({
       ...prev,
       datePreset: preset,
-      startDate: s,
-      endDate: e,
+      ...presetRange(preset),
     }));
   };
 
@@ -146,7 +192,36 @@ export const AnalyticsPage: React.FC = () => {
   };
 
   // Filtered dataset
-  const filteredRecords = filterAttendanceRecords(attendance, employees, filters);
+  const filteredRecords = useMemo(
+    () => filterAttendanceRecords(attendance, employees, filters),
+    [attendance, employees, filters]
+  );
+
+  // Same filters over the equally long period just before, for the "vs prev" labels
+  const prevRecords = useMemo(
+    () =>
+      filterAttendanceRecords(attendance, employees, {
+        ...filters,
+        ...previousRange(filters.startDate, filters.endDate),
+      }),
+    [attendance, employees, filters]
+  );
+
+  // Active employees covered by the current filters (for leave quota use)
+  const filteredEmployees = employees.filter(
+    (e) =>
+      e.status === 'Active' &&
+      (!filters.employeeId || e.id === filters.employeeId) &&
+      (filters.departments.length === 0 || filters.departments.includes(e.department)) &&
+      (!filters.employmentType || e.employmentType === filters.employmentType) &&
+      (!filters.shiftId || e.shiftId === filters.shiftId)
+  );
+  const filteredEmpIds = new Set(filteredEmployees.map((e) => e.id));
+  // Leave quota use is measured for the calendar year the period ends in
+  const leaveYear = (filters.endDate || todayStr()).slice(0, 4);
+  const yearLeaves = leaves.filter(
+    (l) => filteredEmpIds.has(l.employeeId) && l.fromDate.startsWith(leaveYear)
+  );
 
   // Calculations
   const totalLeaveQuotas =
@@ -156,38 +231,53 @@ export const AnalyticsPage: React.FC = () => {
 
   const attendanceKPIs = calculateAttendanceKPIs(
     filteredRecords,
-    leaves,
-    employees.length,
+    yearLeaves,
+    filteredEmployees.length,
     totalLeaveQuotas
   );
+  const hasPrevData = prevRecords.some((r) => r.status !== 'Weekend' && r.status !== 'Holiday');
+  const prevKPIs = hasPrevData
+    ? calculateAttendanceKPIs(prevRecords, [], filteredEmployees.length, totalLeaveQuotas)
+    : null;
 
   const payrollKPIs = calculatePayrollKPIs(payrolls);
   const bradfordScores = calculateBradfordScores(attendance, employees);
-  const checkInDist = calculateCheckInDistribution(filteredRecords);
-  const dowPatterns = calculateDayOfWeekPattern(filteredRecords);
+  const bradfordRows = bradfordScores.filter((b) => b.days > 0);
+  // Memoized so Recharts only re-animates when the data really changes
+  const checkInDist = useMemo(() => calculateCheckInDistribution(filteredRecords), [filteredRecords]);
+  const checkInCells = useMemo(
+    () =>
+      checkInDist.map((entry, index) => (
+        <Cell key={`cell-${index}`} fill={entry.isAfterGrace ? '#F59E0B' : '#10B981'} />
+      )),
+    [checkInDist]
+  );
+  const dowPatterns = useMemo(() => calculateDayOfWeekPattern(filteredRecords), [filteredRecords]);
   const heatmapData = calculateAttendanceHeatmap(filteredRecords);
-  const absenteeismCost = calculateAbsenteeismCostByDepartment(filteredRecords, employees);
+  const absenteeismCost = calculateAbsenteeismCostByDepartment(filteredRecords, employees, 22, grossOf);
   const automatedInsights = generateAutomatedInsights(attendance, payrolls, employees);
 
   // Department Attendance & Punctuality
-  const deptComparisonData = departments.map((dept) => {
-    const deptEmps = employees.filter((e) => e.department === dept).map((e) => e.id);
-    const deptRecs = filteredRecords.filter(
-      (r) =>
-        deptEmps.includes(r.employeeId) &&
-        r.status !== 'Weekend' &&
-        r.status !== 'Holiday'
-    );
-    const total = deptRecs.length || 1;
-    const present = deptRecs.filter((r) => r.status === 'Present' || r.status === 'Late').length;
-    const onTime = deptRecs.filter((r) => r.status === 'Present').length;
+  const deptComparisonData = useMemo(
+    () =>
+      departments.map((dept) => {
+        const deptEmps = new Set(employees.filter((e) => e.department === dept).map((e) => e.id));
+        const deptRecs = filteredRecords.filter(
+          (r) => deptEmps.has(r.employeeId) && r.status !== 'Weekend' && r.status !== 'Holiday'
+        );
+        const total = deptRecs.length;
+        const present = deptRecs.filter((r) => r.status === 'Present' || r.status === 'Late').length;
+        const halfDays = deptRecs.filter((r) => r.status === 'Half Day').length;
+        const onTime = deptRecs.filter((r) => r.status === 'Present').length;
 
-    return {
-      department: dept,
-      attendanceRate: Math.round((present / total) * 100),
-      punctualityRate: present > 0 ? Math.round((onTime / present) * 100) : 100,
-    };
-  });
+        return {
+          department: dept,
+          attendanceRate: total > 0 ? Math.round(((present + halfDays * 0.5) / total) * 100) : 0,
+          punctualityRate: present > 0 ? Math.round((onTime / present) * 100) : 0,
+        };
+      }),
+    [departments, employees, filteredRecords]
+  );
 
   // Top 5 Punctual & Late Comers
   const empPunctualityMap: Record<
@@ -236,19 +326,28 @@ export const AnalyticsPage: React.FC = () => {
       const res = await fetch('/api/ai-summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // The API route reads { kpis, filters }
         body: JSON.stringify({
-          period: `${filters.startDate} to ${filters.endDate}`,
-          attendanceRate: attendanceKPIs.attendanceRate,
-          punctualityRate: attendanceKPIs.punctualityRate,
-          totalEmployees: employees.length,
-          totalPayrollGross: payrollKPIs.totalPayrollCost,
-          overtimeCost: payrollKPIs.overtimeCost,
-          bradfordHighRiskCount: bradfordScores.filter((b) => b.riskLevel === 'High').length,
+          kpis: {
+            attendanceRate: attendanceKPIs.attendanceRate,
+            punctualityRate: attendanceKPIs.punctualityRate,
+            absenteeismRate: attendanceKPIs.absenteeismRate,
+            totalOvertimeHours: attendanceKPIs.totalOvertimeHours,
+            totalEmployees: filteredEmployees.length,
+            totalPayrollGross: payrollKPIs.totalPayrollCost,
+            overtimeCost: payrollKPIs.overtimeCost,
+            bradfordHighRiskCount: bradfordScores.filter((b) => b.riskLevel === 'High').length,
+          },
+          filters: {
+            period: `${filters.startDate} to ${filters.endDate}`,
+            departments: filters.departments,
+            employmentType: filters.employmentType,
+          },
         }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
+      const data = res.ok ? await res.json() : null;
+      if (data?.summary) {
         setAiSummary(data.summary);
         success('AI Briefing Generated', 'Executive summary is ready.');
       } else {
@@ -256,11 +355,19 @@ export const AnalyticsPage: React.FC = () => {
       }
     } catch {
       // Robust client fallback
-      const fallback = `**Executive Workforce Briefing (${filters.startDate} to ${filters.endDate})**
-• **Attendance Health**: Workforce recorded a resilient **${attendanceKPIs.attendanceRate}% attendance rate** with **${attendanceKPIs.punctualityRate}% punctuality**.
-• **Overtime Impact**: Total overtime logged stands at **${attendanceKPIs.totalOvertimeHours} hours**, costing approximately **${formatMoney(payrollKPIs.overtimeCost)}**.
-• **Absenteeism Risk**: ${bradfordScores.filter((b) => b.riskLevel === 'High').length} employee(s) triggered high Bradford Factor risk alerts (>125) due to repetitive short-duration absence patterns.
-• **Recommended Action**: Implement 15-minute flexible arrival windows on Mondays to curb recurring start-of-week lateness in Operations.`;
+      // Rule-based summary (plain text: the panel does not render markdown)
+      const highRisk = bradfordScores.filter((b) => b.riskLevel === 'High').length;
+      const fallback = `Executive Workforce Briefing (${filters.startDate} to ${filters.endDate})
+• Attendance Health: ${attendanceKPIs.attendanceRate}% attendance rate, ${attendanceKPIs.punctualityRate}% punctuality and ${attendanceKPIs.absenteeismRate}% absenteeism.
+• Overtime Impact: ${attendanceKPIs.totalOvertimeHours} overtime hours logged in the period; overtime pay across all payroll runs is ${formatMoney(payrollKPIs.overtimeCost)}.
+• Absenteeism Risk: ${highRisk} employee(s) in the high Bradford Factor band (score of 125 or more over the last 6 months).
+• Recommended Action: ${
+        highRisk > 0
+          ? 'Hold return-to-work conversations with the high-risk employees in the Bradford table.'
+          : attendanceKPIs.punctualityRate < 90
+          ? 'Review arrival patterns with team leads; punctuality is below the 90% target.'
+          : 'Keep current attendance practices; no significant risks detected.'
+      }`;
       setAiSummary(fallback);
       info('Summary Generated', 'Loaded automated analysis summary.');
     } finally {
@@ -272,13 +379,21 @@ export const AnalyticsPage: React.FC = () => {
   // Employee Role View: My Analytics
   // -------------------------------------------------------------
   if (isEmployee) {
-    const myEmpId = user?.employeeId || 'EMP-001';
-    const myRecords = attendance.filter((r) => r.employeeId === myEmpId);
+    const myEmpId = user?.employeeId || '';
+    const myRecords = attendance
+      .filter((r) => r.employeeId === myEmpId)
+      .sort((a, b) => a.date.localeCompare(b.date));
     const myWorkRecords = myRecords.filter((r) => r.status !== 'Weekend' && r.status !== 'Holiday');
     const myPresent = myWorkRecords.filter((r) => r.status === 'Present' || r.status === 'Late').length;
     const myLate = myWorkRecords.filter((r) => r.status === 'Late').length;
     const myPunctuality = myPresent > 0 ? Math.round(((myPresent - myLate) / myPresent) * 100) : 100;
-    const companyAvgPunctuality = 91;
+    const companyPresent = attendance.filter((r) => r.status === 'Present' || r.status === 'Late');
+    const companyAvgPunctuality =
+      companyPresent.length > 0
+        ? Math.round(
+            (companyPresent.filter((r) => r.status === 'Present').length / companyPresent.length) * 100
+          )
+        : 100;
 
     return (
       <div className="space-y-6">
@@ -302,14 +417,18 @@ export const AnalyticsPage: React.FC = () => {
                 Punctuality Rating: {myPunctuality}%
               </p>
               <p className="text-xs text-indigo-700 dark:text-indigo-300">
-                {myPunctuality >= companyAvgPunctuality
-                  ? `Your punctuality is ${myPunctuality - companyAvgPunctuality}% above company average!`
-                  : `Your punctuality is close to the company target of ${companyAvgPunctuality}%.`}
+                {myPresent === 0
+                  ? 'No check-ins recorded yet.'
+                  : myPunctuality > companyAvgPunctuality
+                  ? `Your punctuality is ${myPunctuality - companyAvgPunctuality} points above the company average of ${companyAvgPunctuality}%.`
+                  : myPunctuality === companyAvgPunctuality
+                  ? `Your punctuality matches the company average of ${companyAvgPunctuality}%.`
+                  : `Your punctuality is ${companyAvgPunctuality - myPunctuality} points below the company average of ${companyAvgPunctuality}%.`}
               </p>
             </div>
           </div>
           <span className="px-3 py-1 rounded-full text-xs font-bold bg-indigo-600 text-white shadow-xs">
-            {myPunctuality >= 90 ? 'Top Performer' : 'Good Standing'}
+            {myPresent === 0 ? 'No data yet' : myPunctuality >= 90 ? 'Top Performer' : 'Good Standing'}
           </span>
         </div>
 
@@ -347,6 +466,9 @@ export const AnalyticsPage: React.FC = () => {
             Personal Attendance Calendar
           </h3>
           <p className="text-xs text-neutral-500 mb-4">Daily punch consistency</p>
+          {myRecords.length === 0 && (
+            <p className="text-xs text-neutral-400">No attendance recorded yet.</p>
+          )}
           <div className="grid grid-cols-7 sm:grid-cols-10 gap-2">
             {myRecords.slice(-30).map((r) => {
               const bg =
@@ -354,9 +476,13 @@ export const AnalyticsPage: React.FC = () => {
                   ? 'bg-emerald-500 text-white'
                   : r.status === 'Late'
                   ? 'bg-amber-500 text-white'
+                  : r.status === 'Half Day'
+                  ? 'bg-orange-400 text-white'
                   : r.status === 'Absent'
                   ? 'bg-rose-500 text-white'
-                  : 'bg-neutral-200 dark:bg-neutral-800 text-neutral-400';
+                  : r.status === 'On Leave'
+                  ? 'bg-sky-500 text-white'
+                  : 'bg-neutral-200 dark:bg-neutral-800 text-neutral-500 dark:text-neutral-400';
               return (
                 <div
                   key={r.id}
@@ -364,7 +490,9 @@ export const AnalyticsPage: React.FC = () => {
                   title={`${r.date}: ${r.status}`}
                 >
                   <span className="block text-[10px] opacity-80">{r.date.slice(5)}</span>
-                  <span className="font-bold">{r.status[0]}</span>
+                  <span className="font-bold">
+                    {r.status === 'Half Day' ? 'HD' : r.status === 'On Leave' ? 'L' : r.status[0]}
+                  </span>
                 </div>
               );
             })}
@@ -540,7 +668,7 @@ export const AnalyticsPage: React.FC = () => {
               <p className="text-xl font-bold font-mono text-emerald-600 dark:text-emerald-400 mt-1">
                 {attendanceKPIs.attendanceRate}%
               </p>
-              <span className="text-[10px] text-emerald-600 font-medium">▲ +1.4% vs prev</span>
+              <DeltaLabel current={attendanceKPIs.attendanceRate} previous={prevKPIs?.attendanceRate ?? null} higherIsBetter />
             </div>
 
             <div className="p-3.5 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs">
@@ -548,7 +676,7 @@ export const AnalyticsPage: React.FC = () => {
               <p className="text-xl font-bold font-mono text-indigo-600 dark:text-indigo-400 mt-1">
                 {attendanceKPIs.punctualityRate}%
               </p>
-              <span className="text-[10px] text-emerald-600 font-medium">▲ +2.1% on-time</span>
+              <DeltaLabel current={attendanceKPIs.punctualityRate} previous={prevKPIs?.punctualityRate ?? null} higherIsBetter />
             </div>
 
             <div className="p-3.5 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs">
@@ -556,7 +684,11 @@ export const AnalyticsPage: React.FC = () => {
               <p className="text-xl font-bold font-mono text-rose-600 dark:text-rose-400 mt-1">
                 {attendanceKPIs.absenteeismRate}%
               </p>
-              <span className="text-[10px] text-rose-500 font-medium">▼ -0.8% healthy</span>
+              <DeltaLabel
+                current={attendanceKPIs.absenteeismRate}
+                previous={prevKPIs?.absenteeismRate ?? null}
+                higherIsBetter={false}
+              />
             </div>
 
             <div className="p-3.5 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs">
@@ -564,7 +696,7 @@ export const AnalyticsPage: React.FC = () => {
               <p className="text-xl font-bold font-mono text-neutral-900 dark:text-neutral-100 mt-1">
                 {attendanceKPIs.avgCheckInTime}
               </p>
-              <span className="text-[10px] text-neutral-400">Within grace window</span>
+              <span className="text-[10px] text-neutral-400">Average arrival</span>
             </div>
 
             <div className="p-3.5 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs">
@@ -572,7 +704,7 @@ export const AnalyticsPage: React.FC = () => {
               <p className="text-xl font-bold font-mono text-neutral-900 dark:text-neutral-100 mt-1">
                 {attendanceKPIs.avgCheckOutTime}
               </p>
-              <span className="text-[10px] text-neutral-400">Standard close</span>
+              <span className="text-[10px] text-neutral-400">Average departure</span>
             </div>
 
             <div className="p-3.5 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs">
@@ -580,7 +712,7 @@ export const AnalyticsPage: React.FC = () => {
               <p className="text-xl font-bold font-mono text-neutral-900 dark:text-neutral-100 mt-1">
                 {attendanceKPIs.avgWorkedHours}h
               </p>
-              <span className="text-[10px] text-neutral-400">Net after 1h lunch</span>
+              <span className="text-[10px] text-neutral-400">Net of shift break</span>
             </div>
 
             <div className="p-3.5 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs">
@@ -596,7 +728,7 @@ export const AnalyticsPage: React.FC = () => {
               <p className="text-xl font-bold font-mono text-amber-600 dark:text-amber-400 mt-1">
                 {attendanceKPIs.leaveUtilization}%
               </p>
-              <span className="text-[10px] text-neutral-400">Of annual entitlement</span>
+              <span className="text-[10px] text-neutral-400">Of {leaveYear} entitlement</span>
             </div>
           </div>
 
@@ -608,14 +740,14 @@ export const AnalyticsPage: React.FC = () => {
                 Department Attendance vs Punctuality Rate
               </h3>
               <p className="text-xs text-neutral-500 mb-4">
-                Comparison across Engineering, HR, Finance, Sales, and Ops
+                Working days attended and on-time share of check-ins, per department
               </p>
               <div className="h-64 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={deptComparisonData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.15} vertical={false} />
                     <XAxis dataKey="department" {...axisProps} />
-                    <YAxis {...axisProps} domain={[70, 100]} />
+                    <YAxis {...axisProps} domain={[0, 100]} />
                     <Tooltip formatter={(v: any) => `${v}%`} {...tooltipStyle} cursor={barCursor} />
                     <Bar {...barAnimation(0)} dataKey="attendanceRate" fill="#4F46E5" name="Attendance Rate %" radius={[4, 4, 0, 0]} />
                     <Bar {...barAnimation(1)} dataKey="punctualityRate" fill="#10B981" name="Punctuality Rate %" radius={[4, 4, 0, 0]} />
@@ -639,13 +771,8 @@ export const AnalyticsPage: React.FC = () => {
                     <XAxis dataKey="bucket" {...axisProps} />
                     <YAxis {...axisProps} />
                     <Tooltip {...tooltipStyle} cursor={barCursor} />
-                    <Bar {...barAnimation(0)} dataKey="count" radius={[4, 4, 0, 0]}>
-                      {checkInDist.map((entry, index) => (
-                        <Cell
-                          key={`cell-${index}`}
-                          fill={entry.isAfterGrace ? '#F59E0B' : '#10B981'}
-                        />
-                      ))}
+                    <Bar {...barAnimation(0)} dataKey="count" name="Check-ins" radius={[4, 4, 0, 0]}>
+                      {checkInCells}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
@@ -687,13 +814,15 @@ export const AnalyticsPage: React.FC = () => {
                   Daily workforce presence density (% of staff present)
                 </p>
 
+                {heatmapData.length === 0 && (
+                  <p className="text-xs text-neutral-400">No working-day attendance in this period.</p>
+                )}
                 <div className="grid grid-cols-7 gap-1.5 max-h-48 overflow-y-auto">
                   {heatmapData.map((d) => {
-                    let bg = 'bg-neutral-100 dark:bg-neutral-800';
+                    let bg = 'bg-rose-400 text-white';
                     if (d.rate >= 95) bg = 'bg-emerald-600 text-white';
                     else if (d.rate >= 88) bg = 'bg-emerald-400 text-neutral-900';
                     else if (d.rate >= 80) bg = 'bg-amber-400 text-neutral-900';
-                    else if (d.rate > 0) bg = 'bg-rose-400 text-white';
 
                     return (
                       <div
@@ -711,7 +840,7 @@ export const AnalyticsPage: React.FC = () => {
 
               <div className="flex items-center justify-end gap-2 text-[11px] text-neutral-400 pt-3 border-t border-neutral-100 dark:border-neutral-800">
                 <span>Density:</span>
-                <span className="w-3 h-3 rounded bg-neutral-200 dark:bg-neutral-700" /> &lt;80%
+                <span className="w-3 h-3 rounded bg-rose-400" /> &lt;80%
                 <span className="w-3 h-3 rounded bg-amber-400" /> 80-88%
                 <span className="w-3 h-3 rounded bg-emerald-400" /> 88-95%
                 <span className="w-3 h-3 rounded bg-emerald-600" /> 95%+
@@ -747,7 +876,14 @@ export const AnalyticsPage: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
-                    {bradfordScores.slice(0, 7).map((b) => (
+                    {bradfordRows.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="py-8 text-center text-neutral-400">
+                          No absences in the last 6 months.
+                        </td>
+                      </tr>
+                    )}
+                    {bradfordRows.slice(0, 7).map((b) => (
                       <tr key={b.employeeId} className="hover:bg-neutral-50 dark:hover:bg-neutral-800/40">
                         <td className="py-2.5 px-4 font-medium text-neutral-900 dark:text-neutral-100">
                           {b.name}
@@ -781,6 +917,9 @@ export const AnalyticsPage: React.FC = () => {
                   <Award className="w-3.5 h-3.5" /> Top Punctual Performers
                 </h4>
                 <div className="space-y-1.5">
+                  {top5Punctual.length === 0 && (
+                    <p className="text-xs text-neutral-400">No check-ins in this period.</p>
+                  )}
                   {top5Punctual.map((p, idx) => (
                     <div
                       key={p.id}
@@ -803,6 +942,9 @@ export const AnalyticsPage: React.FC = () => {
                   <AlertTriangle className="w-3.5 h-3.5" /> Frequent Late Comers (Past Grace)
                 </h4>
                 <div className="space-y-1.5">
+                  {top5Late.length === 0 && (
+                    <p className="text-xs text-neutral-400">No late arrivals in this period.</p>
+                  )}
                   {top5Late.map((l) => (
                     <div
                       key={l.id}
@@ -877,16 +1019,13 @@ export const AnalyticsPage: React.FC = () => {
               <h3 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 mb-1">
                 Department-wise Salary Cost
               </h3>
-              <p className="text-xs text-neutral-500 mb-4">Total monthly salary allocation by department</p>
+              <p className="text-xs text-neutral-500 mb-4">Monthly gross salary of active staff by department</p>
               <div className="space-y-3">
                 {departments.map((dept) => {
-                  const deptEmps = employees.filter((e) => e.department === dept);
-                  const totalBasic = deptEmps.reduce((acc, e) => acc + e.basicSalary, 0);
-                  const totalGross = totalBasic * 1.5 + deptEmps.length * settings.payroll.conveyanceFixed;
-                  const totalAllGross = employees.reduce(
-                    (acc, e) => acc + e.basicSalary * 1.5 + settings.payroll.conveyanceFixed,
-                    0
-                  );
+                  const activeEmps = employees.filter((e) => e.status === 'Active');
+                  const deptEmps = activeEmps.filter((e) => e.department === dept);
+                  const totalGross = deptEmps.reduce((acc, e) => acc + grossOf(e.basicSalary), 0);
+                  const totalAllGross = activeEmps.reduce((acc, e) => acc + grossOf(e.basicSalary), 0);
                   const pct = Math.round((totalGross / (totalAllGross || 1)) * 100);
 
                   return (
@@ -942,7 +1081,11 @@ export const AnalyticsPage: React.FC = () => {
                   <div className="flex justify-between p-2.5 rounded-lg bg-neutral-50 dark:bg-neutral-800/60">
                     <span>Active Loan / Advance Recoveries</span>
                     <span className="font-mono font-bold text-emerald-600">
-                      {formatMoney(loans.reduce((acc, l) => acc + l.monthlyInstallment, 0))}
+                      {formatMoney(
+                        loans
+                          .filter((l) => l.status === 'Active')
+                          .reduce((acc, l) => acc + l.monthlyInstallment, 0)
+                      )}
                     </span>
                   </div>
                 </div>
@@ -1051,7 +1194,7 @@ export const AnalyticsPage: React.FC = () => {
               Estimated Financial Cost of Absenteeism
             </h3>
             <p className="text-xs text-neutral-500 mb-4">
-              Calculated as: Absent Days × Per-Day Salary (Basic + Fixed Allowances)
+              Calculated as: Absent Days (a half day counts 0.5) × Per-Day Gross Salary (gross ÷ 22)
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
               {absenteeismCost.map((a) => (

@@ -13,6 +13,7 @@ import {
 } from '../types';
 import { calculateSalary } from '../utils/payrollEngine';
 import { evaluateAttendanceStatus, getWorkingDaysInMonth } from '../utils/attendanceEngine';
+import { addDaysStr, todayStr } from '../utils/dateUtils';
 
 // Seeded pseudo-random generator for consistent deterministic records
 function createSeededRandom(initialSeed: number) {
@@ -645,8 +646,9 @@ export const defaultRegularizations: RegularizationRequest[] = [
 ];
 
 /**
- * Generates 6 full months of realistic attendance records (March 2026 - August 2026)
- * plus September 2026 to date (2026-09-23).
+ * Generates realistic attendance from March 2026 up to today: complete days for the past,
+ * and check-ins (no check-out yet) today for staff whose shift has already started.
+ * The history always covers at least March - August 2026, which the seeded payrolls use.
  */
 export function generateSeedAttendance(): AttendanceRecord[] {
   const records: AttendanceRecord[] = [];
@@ -655,23 +657,15 @@ export function generateSeedAttendance(): AttendanceRecord[] {
   const shiftsMap: Record<string, Shift> = {};
   defaultShifts.forEach((s) => (shiftsMap[s.id] = s));
 
-  // Months to generate: 2026-03 to 2026-09
-  const months = [
-    { year: 2026, month: 3, days: 31 },
-    { year: 2026, month: 4, days: 30 },
-    { year: 2026, month: 5, days: 31 },
-    { year: 2026, month: 6, days: 30 },
-    { year: 2026, month: 7, days: 31 },
-    { year: 2026, month: 8, days: 31 },
-    { year: 2026, month: 9, days: 23 }, // current month to date (Sept 23, 2026)
-  ];
+  const today = todayStr();
+  const lastDate = today > '2026-08-31' ? today : '2026-08-31';
+  const now = new Date();
+  const nowHHmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-  for (const m of months) {
-    for (let day = 1; day <= m.days; day++) {
-      const dayStr = String(day).padStart(2, '0');
-      const monthStr = String(m.month).padStart(2, '0');
-      const dateStr = `${m.year}-${monthStr}-${dayStr}`;
-      const d = new Date(m.year, m.month - 1, day);
+  for (let dateStr = '2026-03-01'; dateStr <= lastDate; dateStr = addDaysStr(dateStr, 1)) {
+    {
+      const d = new Date(dateStr + 'T00:00:00');
+      const day = d.getDate();
       const dayOfWeek = d.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
 
       const isHoliday = defaultHolidays.some((h) => h.date === dateStr);
@@ -728,49 +722,31 @@ export function generateSeedAttendance(): AttendanceRecord[] {
           continue;
         }
 
-        // If today (2026-09-23)
-        if (dateStr === '2026-09-23') {
-          // Live today: most employees already checked in this morning
+        // Today: staff whose shift has started have checked in, with no check-out yet.
+        if (dateStr === today) {
           const r = rand();
-          let checkInTime = '08:54';
-          let status: any = 'Present';
-
-          if (emp.id === 'EMP-001') {
-            checkInTime = '08:52';
-          } else if (emp.id === 'EMP-002') {
-            checkInTime = '09:02';
-          } else if (emp.id === 'EMP-003') {
-            checkInTime = '08:58';
-          } else if (emp.id === 'EMP-005') {
-            // Late today
-            checkInTime = '09:28';
-            status = 'Late';
-          } else if (emp.id === 'EMP-007' || emp.id === 'EMP-011') {
-            // Evening shift
-            checkInTime = '13:55';
-          } else if (emp.id === 'EMP-009') {
-            // Weekend shift
-            checkInTime = undefined as any;
-            status = 'Weekend';
-          }
-
-          if (status !== 'Weekend') {
-            records.push({
-              id: `att-${emp.id}-${dateStr}`,
-              employeeId: emp.id,
-              date: dateStr,
-              checkIn: checkInTime,
-              checkInLocation: {
-                lat: 24.8607 + (r - 0.5) * 0.01,
-                lng: 67.0011 + (r - 0.5) * 0.01,
-                address: 'Main HQ Office, Tech Park, Karachi',
-              },
-              status: status,
-              workedMinutes: 240, // live in progress
-              overtimeMinutes: 0,
-              isEarlyDeparture: false,
-            });
-          }
+          if (nowHHmm < shift.startTime) continue; // shift not started: not marked yet
+          const [h, m] = shift.startTime.split(':').map(Number);
+          // Bilal (EMP-005) runs late; everyone else arrives a few minutes either side of start.
+          const offset = emp.id === 'EMP-005' ? 28 : Math.floor(r * 12) - 8;
+          const mins = h * 60 + m + offset;
+          const checkInTime = `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+          const evaluated = evaluateAttendanceStatus(checkInTime, undefined, shift, dateStr, defaultHolidays);
+          records.push({
+            id: `att-${emp.id}-${dateStr}`,
+            employeeId: emp.id,
+            date: dateStr,
+            checkIn: checkInTime,
+            checkInLocation: {
+              lat: 24.8607 + (r - 0.5) * 0.01,
+              lng: 67.0011 + (r - 0.5) * 0.01,
+              address: 'Main HQ Office, Tech Park, Karachi',
+            },
+            status: evaluated.status,
+            workedMinutes: 0,
+            overtimeMinutes: 0,
+            isEarlyDeparture: false,
+          });
           continue;
         }
 

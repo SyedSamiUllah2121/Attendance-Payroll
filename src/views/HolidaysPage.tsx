@@ -5,6 +5,15 @@ import { storageService } from '../services/storageService';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { Modal } from '../components/common/Modal';
+import { ConfirmDialog } from '../components/common/ConfirmDialog';
+import { todayStr } from '../utils/dateUtils';
+
+const blankHolidayForm = () => ({
+  name: '',
+  date: todayStr(),
+  type: 'Gazetted' as 'Gazetted' | 'Optional',
+  description: '',
+});
 
 export const HolidaysPage: React.FC = () => {
   const { can } = useAuth();
@@ -13,12 +22,10 @@ export const HolidaysPage: React.FC = () => {
 
   const [holidays, setHolidays] = useState<Holiday[]>(() => storageService.getHolidays());
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [form, setForm] = useState({
-    name: '',
-    date: '2026-11-09',
-    type: 'Gazetted' as 'Gazetted' | 'Optional',
-    description: '',
-  });
+  const [form, setForm] = useState(blankHolidayForm);
+  const [deletingHoliday, setDeletingHoliday] = useState<Holiday | null>(null);
+  const today = todayStr();
+  const years = Array.from(new Set(holidays.map((h) => h.date.slice(0, 4)))).sort();
 
   const reloadHolidays = () => {
     setHolidays(storageService.getHolidays());
@@ -30,26 +37,37 @@ export const HolidaysPage: React.FC = () => {
       error('Name required', 'Please specify the holiday title.');
       return;
     }
+    if (!form.date) {
+      error('Date required', 'Please pick the holiday date.');
+      return;
+    }
+    const clash = holidays.find((h) => h.date === form.date);
+    if (clash) {
+      error('Date taken', `${form.date} is already a holiday (${clash.name}).`);
+      return;
+    }
 
     const newH: Holiday = {
       id: `hol-${Date.now()}`,
-      name: form.name,
+      name: form.name.trim(),
       date: form.date,
       type: form.type,
       description: form.description,
     };
 
     const updated = [...holidays, newH].sort((a, b) => a.date.localeCompare(b.date));
+    // Saving re-syncs attendance: unmarked days on this date become Holiday.
     storageService.saveHolidays(updated);
-    success('Holiday Added', `${form.name} added to company calendar.`);
+    success('Holiday Added', `${newH.name} added to company calendar.`);
     reloadHolidays();
     setIsAddModalOpen(false);
+    setForm(blankHolidayForm());
   };
 
-  const handleDeleteHoliday = (id: string) => {
-    const updated = holidays.filter((h) => h.id !== id);
+  const handleDeleteHoliday = (holiday: Holiday) => {
+    const updated = holidays.filter((h) => h.id !== holiday.id);
     storageService.saveHolidays(updated);
-    success('Holiday Removed', 'Holiday deleted from calendar.');
+    success('Holiday Removed', `${holiday.name} deleted from calendar.`);
     reloadHolidays();
   };
 
@@ -61,13 +79,16 @@ export const HolidaysPage: React.FC = () => {
             Company & Gazetted Holidays
           </h1>
           <p className="text-xs md:text-sm text-neutral-500 dark:text-neutral-400 mt-0.5">
-            Official paid non-working days for 2026 (exempt from absenteeism calculations)
+            Official paid non-working days{years.length ? ` for ${years.length > 1 ? `${years[0]}–${years[years.length - 1]}` : years[0]}` : ''} (exempt from absenteeism calculations)
           </p>
         </div>
 
         {canManage && (
           <button
-            onClick={() => setIsAddModalOpen(true)}
+            onClick={() => {
+              setForm(blankHolidayForm());
+              setIsAddModalOpen(true);
+            }}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 self-start sm:self-auto transition-colors cursor-pointer"
           >
             <Plus className="w-4 h-4" /> Add Holiday
@@ -76,6 +97,11 @@ export const HolidaysPage: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {holidays.length === 0 && (
+          <div className="col-span-full p-8 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-center text-xs text-neutral-400">
+            No holidays on the calendar yet.
+          </div>
+        )}
         {holidays.map((h) => {
           const d = new Date(h.date + 'T00:00:00');
           const dayName = d.toLocaleDateString('en-US', { weekday: 'long' });
@@ -108,8 +134,8 @@ export const HolidaysPage: React.FC = () => {
 
               {canManage && (
                 <button
-                  onClick={() => handleDeleteHoliday(h.id)}
-                  className="p-1 text-neutral-400 hover:text-rose-600 transition-colors"
+                  onClick={() => setDeletingHoliday(h)}
+                  className="p-1 text-neutral-400 hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
                   title="Delete Holiday"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -119,6 +145,24 @@ export const HolidaysPage: React.FC = () => {
           );
         })}
       </div>
+
+      <ConfirmDialog
+        isOpen={!!deletingHoliday}
+        onClose={() => setDeletingHoliday(null)}
+        onConfirm={() => deletingHoliday && handleDeleteHoliday(deletingHoliday)}
+        title="Delete Holiday"
+        message={
+          deletingHoliday
+            ? `Remove ${deletingHoliday.name} (${deletingHoliday.date}) from the calendar?${
+                deletingHoliday.date <= today
+                  ? ' Unmarked attendance on that day will be re-marked as a working day (Absent unless on leave).'
+                  : ''
+              }`
+            : ''
+        }
+        confirmText="Delete"
+        isDanger
+      />
 
       {isAddModalOpen && (
         <Modal
@@ -189,7 +233,7 @@ export const HolidaysPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsAddModalOpen(false)}
-                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200"
+                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700"
               >
                 Cancel
               </button>

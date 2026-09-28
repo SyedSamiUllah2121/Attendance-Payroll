@@ -44,7 +44,7 @@ export const TopBar: React.FC<TopBarProps> = ({
 }) => {
   const { user, quickLogin, logout, can } = useAuth();
   const { darkMode, toggleDarkMode } = useSettings();
-  const { success } = useNotification();
+  const { success, info } = useNotification();
 
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -83,7 +83,14 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const handleLeave = (leave: LeaveRequest, action: 'Approved' | 'Rejected', e: React.MouseEvent) => {
     e.stopPropagation();
-    reviewLeave(leave, action, reviewer);
+    // The list can be a moment behind a review done on another page: never review twice.
+    const current = storageService.getLeaves().find((l) => l.id === leave.id);
+    if (!current || current.status !== 'Pending') {
+      info('Already reviewed', 'This leave request was already handled.');
+      onRefreshData();
+      return;
+    }
+    reviewLeave(current, action, reviewer);
     const name = empById(leave.employeeId)?.name || leave.employeeId;
     success(`Leave ${action}`, `${name}'s ${leave.leaveType.toLowerCase()} leave was ${action.toLowerCase()}.`);
     onRefreshData();
@@ -91,7 +98,13 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const handleReg = (reg: RegularizationRequest, action: 'Approved' | 'Rejected', e: React.MouseEvent) => {
     e.stopPropagation();
-    reviewRegularization(reg, action, reviewer);
+    const current = storageService.getRegularizations().find((r) => r.id === reg.id);
+    if (!current || current.status !== 'Pending') {
+      info('Already reviewed', 'This correction request was already handled.');
+      onRefreshData();
+      return;
+    }
+    reviewRegularization(current, action, reviewer);
     const name = empById(reg.employeeId)?.name || reg.employeeId;
     success(`Correction ${action}`, `${name}'s attendance for ${formatDay(reg.date)} was ${action.toLowerCase()}.`);
     onRefreshData();
