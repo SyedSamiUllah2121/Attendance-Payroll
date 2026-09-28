@@ -32,7 +32,7 @@ import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { evaluateAttendanceStatus, resolveUnmarkedDay, UnmarkedDayStatus } from '../utils/attendanceEngine';
-import { addDaysStr, currentMonthStr, todayStr } from '../utils/dateUtils';
+import { addDaysStr, todayStr } from '../utils/dateUtils';
 
 const TIMED_STATUSES: AttendanceStatus[] = ['Present', 'Late', 'Half Day'];
 
@@ -65,6 +65,7 @@ const csvCell = (v: string | number) => {
   return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 };
 import { MarkAttendanceSheet } from '../components/attendance/MarkAttendanceSheet';
+import { MonthlyAttendanceGrid } from '../components/attendance/MonthlyAttendanceGrid';
 import { reviewRegularization } from '../services/approvalService';
 
 export const AttendancePage: React.FC = () => {
@@ -93,7 +94,6 @@ export const AttendancePage: React.FC = () => {
   );
   const today = todayStr();
   const [selectedDate, setSelectedDate] = useState(today);
-  const [selectedMonth, setSelectedMonth] = useState(currentMonthStr());
   const [departmentFilter, setDepartmentFilter] = useState('');
 
   // Switch tabs when asked while this page is already open (e.g. from the notification bell)
@@ -195,8 +195,7 @@ export const AttendancePage: React.FC = () => {
     if (departmentFilter && emp.department !== departmentFilter) return false;
     // Former staff only appear for periods where they still have attendance.
     if (emp.status !== 'Active') {
-      const period = viewMode === 'monthly' ? selectedMonth : selectedDate;
-      return attendance.some((r) => r.employeeId === emp.id && r.date.startsWith(period));
+      return attendance.some((r) => r.employeeId === emp.id && r.date === selectedDate);
     }
     return true;
   });
@@ -400,6 +399,7 @@ export const AttendancePage: React.FC = () => {
 
   // Export CSV
   const handleExportCSV = () => {
+    const selectedMonth = selectedDate.slice(0, 7);
     const headers = ['Employee ID', 'Name', 'Department', 'Date', 'Check-In', 'Check-Out', 'Status', 'Worked (Hrs)', 'OT (Hrs)'];
     const visibleIds = new Set(filteredEmployees.map((e) => e.id));
     const rows = attendance
@@ -434,15 +434,6 @@ export const AttendancePage: React.FC = () => {
     success('Export Complete', `Downloaded attendance for ${selectedMonth}`);
   };
 
-  // -------------------------------------------------------------
-  // Monthly Grid Computations
-  // -------------------------------------------------------------
-  const [yearStr, monthStr] = selectedMonth.split('-');
-  const daysInMonth = new Date(parseInt(yearStr), parseInt(monthStr), 0).getDate();
-  const monthDays = Array.from({ length: daysInMonth }, (_, i) => {
-    const day = String(i + 1).padStart(2, '0');
-    return `${selectedMonth}-${day}`;
-  });
 
   return (
     <div className="space-y-6">
@@ -528,12 +519,12 @@ export const AttendancePage: React.FC = () => {
               >
                 Mark Bulk
               </button>)}
-              <button
+              {viewMode !== 'monthly' && (<button
                 onClick={handleExportCSV}
                 className="px-3.5 py-1.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-100 dark:hover:bg-white text-white dark:text-neutral-900 rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" /> Export CSV
-              </button>
+              </button>)}
             </>
           )}
         </div>
@@ -549,11 +540,11 @@ export const AttendancePage: React.FC = () => {
         />
       )}
 
-      {/* Control Bar */}
-      {viewMode !== 'mark' && (
+      {/* Control Bar (the monthly grid has its own toolbar) */}
+      {viewMode !== 'mark' && viewMode !== 'monthly' && (
       <div className="bg-white dark:bg-neutral-900 p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xs flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
-          {viewMode === 'daily' ? (
+          {viewMode === 'daily' && (
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-neutral-500">Date:</span>
               <input
@@ -561,17 +552,6 @@ export const AttendancePage: React.FC = () => {
                 value={selectedDate}
                 max={today}
                 onChange={(e) => e.target.value && setSelectedDate(e.target.value)}
-                className="px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
-              />
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-neutral-500">Month:</span>
-              <input
-                type="month"
-                value={selectedMonth}
-                max={currentMonthStr()}
-                onChange={(e) => e.target.value && setSelectedMonth(e.target.value)}
                 className="px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
               />
             </div>
@@ -596,31 +576,6 @@ export const AttendancePage: React.FC = () => {
           )}
         </div>
 
-        {viewMode === 'monthly' && (
-          <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-500 font-medium">
-            <span className="flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" /> P (Present)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-sm bg-amber-500" /> L (Late)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-sm bg-rose-500" /> A (Absent)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-sm bg-orange-500" /> HD (Half Day)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-sm bg-sky-500" /> LV (Leave)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-sm bg-purple-500" /> H (Holiday)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-sm bg-neutral-300 dark:bg-neutral-600" /> W (Off day)
-            </span>
-          </div>
-        )}
       </div>
 
       )}
@@ -724,190 +679,19 @@ export const AttendancePage: React.FC = () => {
       )}
 
       {/* ------------------------------------------------------------- */}
-      {/* 2. Monthly Grid Matrix */}
+      {/* 2. Monthly Grid */}
       {/* ------------------------------------------------------------- */}
       {viewMode === 'monthly' && (
-        <div className="bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead className="bg-neutral-50 dark:bg-neutral-800/60 text-neutral-500 font-semibold border-b border-neutral-200 dark:border-neutral-800 sticky top-0">
-                <tr>
-                  <th className="py-3 px-3 min-w-36 sticky left-0 bg-neutral-50 dark:bg-neutral-800 z-10">
-                    Employee
-                  </th>
-                  {monthDays.map((dStr) => {
-                    const dayNum = dStr.slice(8);
-                    const dow = new Date(dStr + 'T00:00:00').getDay();
-                    const isWk = dow === 0 || dow === 6;
-                    const isToday = dStr === today;
-                    const holidayName = holidays.find((h) => h.date === dStr)?.name;
-                    return (
-                      <th
-                        key={dStr}
-                        className={`py-2 px-1 text-center w-8 min-w-8 text-[11px] font-mono ${
-                          isToday
-                            ? 'text-indigo-600 dark:text-indigo-400 font-bold'
-                            : isWk
-                            ? 'bg-neutral-100 dark:bg-neutral-800/80 text-neutral-400'
-                            : ''
-                        }`}
-                        title={`${dStr}${holidayName ? ` · ${holidayName}` : ''}${isToday ? ' · Today' : ''}`}
-                      >
-                        {dayNum}
-                      </th>
-                    );
-                  })}
-                  <th className="py-3 px-2 text-center text-emerald-600 font-bold">P</th>
-                  <th className="py-3 px-2 text-center text-amber-600 font-bold">L</th>
-                  <th className="py-3 px-2 text-center text-orange-600 font-bold">HD</th>
-                  <th className="py-3 px-2 text-center text-rose-600 font-bold">A</th>
-                  <th className="py-3 px-2 text-center text-sky-600 font-bold">LV</th>
-                  <th className="py-3 px-3 text-right">Total Hrs</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
-                {filteredEmployees.map((emp) => {
-                  const empRecords = attendance.filter(
-                    (r) => r.employeeId === emp.id && r.date.startsWith(selectedMonth)
-                  );
-                  const recordMap = new Map(empRecords.map((r) => [r.date, r]));
-                  const empShift = shiftOf(emp);
-
-                  let countP = 0;
-                  let countL = 0;
-                  let countHD = 0;
-                  let countA = 0;
-                  let countLV = 0;
-                  let totalMins = 0;
-
-                  empRecords.forEach((r) => {
-                    if (r.status === 'Present') countP++;
-                    else if (r.status === 'Late') countL++;
-                    else if (r.status === 'Half Day') countHD++;
-                    else if (r.status === 'Absent') countA++;
-                    else if (r.status === 'On Leave') countLV++;
-                    totalMins += r.workedMinutes || 0;
-                  });
-
-                  return (
-                    <tr
-                      key={emp.id}
-                      className="hover:bg-neutral-50 dark:hover:bg-neutral-800/40 transition-colors"
-                    >
-                      <td className="py-2 px-3 sticky left-0 bg-white dark:bg-neutral-900 z-10 font-medium truncate max-w-40 border-r border-neutral-100 dark:border-neutral-800">
-                        <p className="truncate font-semibold text-neutral-900 dark:text-neutral-100">
-                          {emp.name}
-                        </p>
-                        <span className="text-[10px] text-neutral-400">{emp.id}</span>
-                      </td>
-
-                      {monthDays.map((dStr) => {
-                        const rec = recordMap.get(dStr);
-                        const dow = new Date(dStr + 'T00:00:00').getDay();
-                        const isWeekend = !(empShift?.workingDays ?? [1, 2, 3, 4, 5]).includes(dow);
-                        const unmarked = rec ? undefined : unmarkedStatus(emp, dStr);
-                        const editable = canMark && dStr <= today && unmarked !== 'Not Joined';
-
-                        let symbol = '';
-                        let colorClass = 'text-neutral-300 dark:text-neutral-600';
-                        let label: string = rec ? rec.status : UNMARKED_LABEL[unmarked!];
-
-                        if (rec) {
-                          if (rec.status === 'Present') {
-                            symbol = 'P';
-                            colorClass =
-                              'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 font-bold';
-                          } else if (rec.status === 'Late') {
-                            symbol = 'L';
-                            colorClass =
-                              'bg-amber-100 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 font-bold';
-                          } else if (rec.status === 'Half Day') {
-                            symbol = 'HD';
-                            colorClass =
-                              'bg-orange-100 dark:bg-orange-950/80 text-orange-700 dark:text-orange-300 font-bold';
-                          } else if (rec.status === 'Absent') {
-                            symbol = 'A';
-                            colorClass =
-                              'bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 font-bold';
-                          } else if (rec.status === 'On Leave') {
-                            symbol = 'LV';
-                            colorClass =
-                              'bg-sky-100 dark:bg-sky-950/80 text-sky-700 dark:text-sky-300 font-bold';
-                          } else if (rec.status === 'Holiday') {
-                            symbol = 'H';
-                            colorClass = 'bg-purple-50 dark:bg-purple-950/60 text-purple-600';
-                          } else if (rec.status === 'Weekend') {
-                            symbol = 'W';
-                            colorClass = 'text-neutral-400';
-                          }
-                          if (rec.autoMarked && rec.status === 'Absent') label = 'Absent (no attendance recorded)';
-                        } else if (unmarked === 'Holiday') {
-                          symbol = 'H';
-                          colorClass = 'bg-purple-50 dark:bg-purple-950/60 text-purple-600';
-                        } else if (unmarked === 'Weekend') {
-                          symbol = 'W';
-                          colorClass = 'text-neutral-400 dark:text-neutral-600';
-                        } else if (unmarked === 'On Leave') {
-                          // Approved leave still ahead
-                          symbol = 'LV';
-                          colorClass = 'bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-400';
-                        } else if (unmarked === 'Pending') {
-                          symbol = '•';
-                          colorClass = 'text-amber-500 ring-1 ring-inset ring-amber-300 dark:ring-amber-700';
-                        } else if (unmarked === 'Absent') {
-                          symbol = 'A';
-                          colorClass = 'bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 font-bold';
-                        }
-
-                        return (
-                          <td
-                            key={dStr}
-                            onClick={() => {
-                              if (editable) openEditor(emp, dStr, rec);
-                            }}
-                            className={`p-0.5 text-center ${editable ? 'cursor-pointer' : 'cursor-default'} ${
-                              isWeekend ? 'bg-neutral-50 dark:bg-neutral-800/40' : ''
-                            }`}
-                            title={`${emp.name} · ${dStr}\nStatus: ${label}${
-                              rec?.checkIn || rec?.checkOut
-                                ? `\nCheck-in: ${rec?.checkIn || '—'} | Out: ${rec?.checkOut || '—'}`
-                                : ''
-                            }${rec?.notes && !rec.autoMarked ? `\nNote: ${rec.notes}` : ''}`}
-                          >
-                            <span
-                              className={`w-6 h-6 inline-flex items-center justify-center rounded text-[10px] font-mono transition-transform hover:scale-110 ${colorClass}`}
-                            >
-                              {symbol}
-                            </span>
-                          </td>
-                        );
-                      })}
-
-                      <td className="py-2 px-2 text-center font-mono font-semibold text-emerald-600">
-                        {countP}
-                      </td>
-                      <td className="py-2 px-2 text-center font-mono font-semibold text-amber-600">
-                        {countL}
-                      </td>
-                      <td className="py-2 px-2 text-center font-mono font-semibold text-orange-600">
-                        {countHD}
-                      </td>
-                      <td className="py-2 px-2 text-center font-mono font-semibold text-rose-600">
-                        {countA}
-                      </td>
-                      <td className="py-2 px-2 text-center font-mono font-semibold text-sky-600">
-                        {countLV}
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
-                        {(totalMins / 60).toFixed(1)}h
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <MonthlyAttendanceGrid
+          employees={isEmployee ? employees.filter((e) => e.id === ownEmployeeId) : employees}
+          shifts={shifts}
+          attendance={attendance}
+          holidays={holidays}
+          leaves={leaves}
+          canMark={canMark}
+          showFilters={!isEmployee}
+          onEditDay={openEditor}
+        />
       )}
 
       {/* ------------------------------------------------------------- */}

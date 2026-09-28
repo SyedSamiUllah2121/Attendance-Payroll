@@ -118,7 +118,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           onRefreshData={handleRefresh}
         />
 
-        <main className="flex-1 p-4 md:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+        <main
+          className={`flex-1 p-4 md:p-6 lg:p-8 w-full mx-auto ${
+            // The attendance register's month grid uses the full width, both sides.
+            activeTab === 'attendance' ? 'max-w-none' : 'max-w-7xl'
+          }`}
+        >
           {children}
         </main>
       </div>
