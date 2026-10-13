@@ -21,9 +21,11 @@ import {
 } from 'lucide-react';
 import {
   DutyPeriod,
+  DutyPeriodType,
   Employee,
   EmployeeHistoryEntry,
   EmploymentType,
+  ExitType,
   Gender,
   EmployeeStatus,
   Shift,
@@ -36,10 +38,8 @@ import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { LeaveRecordView } from '../components/leave/LeaveRecordView';
-import { EmployeeActionKind, EmployeeActionsMenu } from '../components/employees/EmployeeActionsMenu';
-import { EmployeeActionModal } from '../components/employees/EmployeeActionModal';
 import { EmployeeHistoryView } from '../components/employees/EmployeeHistoryView';
-import { recordProfileEdit, setEmployeeStatus } from '../services/employeeActionsService';
+import { isPeriodRunning, saveEmployeeEdit, setEmployeeStatus } from '../services/employeeActionsService';
 import {
   computeLeaveRecord,
   formatService,
@@ -72,7 +72,19 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
   const [shifts] = useState<Shift[]>(() => storageService.getShifts());
   const [dutyPeriods, setDutyPeriods] = useState<DutyPeriod[]>(() => storageService.getDutyPeriods());
   const [history, setHistory] = useState<EmployeeHistoryEntry[]>(() => storageService.getEmployeeHistory());
-  const [action, setAction] = useState<{ kind: EmployeeActionKind; employee: Employee } | null>(null);
+  // Edit dialog extras: when job / salary changes take effect, duty status and exit
+  const blankEditExtras = () => ({
+    effectiveDate: todayStr(),
+    note: '',
+    dutyAction: '' as '' | DutyPeriodType | 'end',
+    dutyStart: todayStr(),
+    dutyEnd: '',
+    dutyNote: '',
+    exitAction: '' as '' | ExitType | 'cancel',
+    lastWorkingDay: todayStr(),
+    exitReason: '',
+  });
+  const [editExtras, setEditExtras] = useState(blankEditExtras);
   const [sites] = useState(() => storageService.getSites());
   const [selectedSite, setSelectedSite] = useState('');
   const today = todayStr();
@@ -219,6 +231,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
       status: emp.status,
       basicSalary: emp.basicSalary,
     });
+    setEditExtras(blankEditExtras());
     setIsFormOpen(true);
   };
 
@@ -268,12 +281,34 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
         ...editingEmployee,
         ...data,
       };
-      // Department, shift, designation, salary and status edits are logged in History too
-      storageService.transaction(() => {
-        recordProfileEdit(editingEmployee, updated, user?.name || 'Manager');
-        storageService.updateEmployee(updated);
-      });
-      success('Employee Updated', `Updated profile of ${updated.name}`);
+      const x = editExtras;
+      if (x.exitAction && x.exitAction !== 'cancel' && !x.exitReason.trim()) {
+        error('Reason required', 'Enter the reason for leaving.');
+        return;
+      }
+      try {
+        // Everything in one transaction: job / salary changes go to History (scheduled when
+        // dated ahead), plus status, exit and duty period changes
+        const done = saveEmployeeEdit(
+          editingEmployee,
+          {
+            edited: updated,
+            effectiveDate: x.effectiveDate,
+            note: x.note,
+            duty: x.dutyAction
+              ? { action: x.dutyAction, startDate: x.dutyStart, endDate: x.dutyEnd, note: x.dutyNote }
+              : undefined,
+            exit: x.exitAction
+              ? { action: x.exitAction, lastWorkingDay: x.lastWorkingDay, reason: x.exitReason }
+              : undefined,
+          },
+          user?.name || 'Manager'
+        );
+        success('Employee Updated', done.length ? `${updated.name}: ${done.join(' · ')}` : `Updated profile of ${updated.name}`);
+      } catch (err) {
+        error('Not saved', err instanceof Error ? err.message : 'Something went wrong.');
+        return;
+      }
     } else {
       const created: Employee = {
         id: nextEmployeeId(stored),
@@ -505,7 +540,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                   </div>
                 </th>
                 <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4 text-right">Actions</th>
+                <th className="py-3 px-4 text-center">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
@@ -580,15 +615,8 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                           </span>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          {canEdit && (
-                            <EmployeeActionsMenu
-                              compact
-                              employee={emp}
-                              onSelect={(kind, employee) => setAction({ kind, employee })}
-                            />
-                          )}
+                      <td className="py-3.5 px-4">
+                        <div className="flex items-center justify-center gap-1">
                           <button
                             onClick={() => {
                               setViewingEmployee(emp);
@@ -960,6 +988,217 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             </div>
           </div>
 
+          {editingEmployee && (() => {
+            const x = editExtras;
+            const setX = (patch: Partial<typeof editExtras>) => setEditExtras({ ...editExtras, ...patch });
+            const jobChanged =
+              formData.department !== editingEmployee.department ||
+              formData.designation.trim() !== editingEmployee.designation ||
+              formData.shiftId !== editingEmployee.shiftId ||
+              (formData.siteId && formData.siteId !== (editingEmployee.siteId || '')) ||
+              Number(formData.basicSalary) !== editingEmployee.basicSalary;
+            const running = dutyPeriods.find((p) => p.employeeId === editingEmployee.id && isPeriodRunning(p, today));
+            const sectionClass =
+              'p-4 rounded-xl bg-neutral-50 dark:bg-neutral-800/60 border border-neutral-100 dark:border-neutral-800 space-y-3';
+            const headClass = 'text-xs font-semibold text-neutral-900 dark:text-neutral-100 uppercase tracking-wider';
+            const labelCls = 'block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1';
+            const fieldCls =
+              'w-full px-3 py-1.5 text-xs bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100';
+            const hintCls = 'text-[11px] text-neutral-500 dark:text-neutral-400';
+            return (
+              <>
+                {/* When site / department / shift / designation / salary changes take effect */}
+                {jobChanged && (
+                  <div className="p-4 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/60 space-y-3">
+                    <h4 className={headClass}>Change Details</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className={labelCls}>Effective From *</label>
+                        <input
+                          type="date"
+                          required
+                          value={x.effectiveDate}
+                          min={editingEmployee.joiningDate}
+                          onChange={(e) => setX({ effectiveDate: e.target.value })}
+                          className={`${fieldCls} font-mono`}
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className={labelCls}>Reason / Note</label>
+                        <input
+                          value={x.note}
+                          onChange={(e) => setX({ note: e.target.value })}
+                          placeholder="e.g. Annual promotion, moved to Dubai office"
+                          className={fieldCls}
+                        />
+                      </div>
+                    </div>
+                    <p className={hintCls}>
+                      {x.effectiveDate > today
+                        ? `Saved to History now; the record changes automatically on ${x.effectiveDate}.`
+                        : x.effectiveDate < today
+                        ? `Backdated: attendance and payroll use the new values from ${x.effectiveDate}.`
+                        : 'Recorded in History as a Transfer / Promotion / Salary Revision. Payroll pays each day at the salary in effect.'}
+                    </p>
+                  </div>
+                )}
+
+                {/* Duty status: Field Duty / WFH / Suspension */}
+                {editingEmployee.status === 'Active' && (
+                  <div className={sectionClass}>
+                    <h4 className={headClass}>Duty Status</h4>
+                    <p className={hintCls}>
+                      {running ? (
+                        <>
+                          Currently <Badge status={running.type} /> {running.startDate > today ? 'scheduled from' : 'since'}{' '}
+                          {running.startDate} → {running.endDate || 'ongoing'}
+                        </>
+                      ) : (
+                        'Working normally (no Field Duty, WFH or Suspension).'
+                      )}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className={labelCls}>Change</label>
+                        <select
+                          value={x.dutyAction}
+                          onChange={(e) => {
+                            const action = e.target.value as typeof x.dutyAction;
+                            setX({
+                              dutyAction: action,
+                              // Ending: default to today, or the start of a scheduled period
+                              dutyEnd: action === 'end' && running ? (running.startDate > today ? running.startDate : today) : '',
+                            });
+                          }}
+                          className={fieldCls}
+                        >
+                          <option value="">No change</option>
+                          <option value="Field Duty">Start Field Duty</option>
+                          <option value="WFH">Start Work From Home</option>
+                          <option value="Suspension">Start Suspension</option>
+                          {running && <option value="end">End current {running.type}</option>}
+                        </select>
+                      </div>
+                      {x.dutyAction && x.dutyAction !== 'end' && (
+                        <>
+                          <div>
+                            <label className={labelCls}>Start Date *</label>
+                            <input
+                              type="date"
+                              required
+                              value={x.dutyStart}
+                              min={editingEmployee.joiningDate}
+                              onChange={(e) => setX({ dutyStart: e.target.value })}
+                              className={`${fieldCls} font-mono`}
+                            />
+                          </div>
+                          <div>
+                            <label className={labelCls}>End Date</label>
+                            <input
+                              type="date"
+                              value={x.dutyEnd}
+                              min={x.dutyStart}
+                              onChange={(e) => setX({ dutyEnd: e.target.value })}
+                              className={`${fieldCls} font-mono`}
+                            />
+                          </div>
+                          <div className="sm:col-span-3">
+                            <input
+                              value={x.dutyNote}
+                              onChange={(e) => setX({ dutyNote: e.target.value })}
+                              placeholder="Note (optional)"
+                              className={fieldCls}
+                            />
+                            <p className={`${hintCls} mt-1`}>
+                              {x.dutyAction === 'Suspension'
+                                ? 'Shows as Suspended in attendance; those working days are unpaid.'
+                                : `Shows as ${x.dutyAction === 'WFH' ? 'WFH' : 'On Duty'} (paid) every day.`}{' '}
+                              Leave the end date empty to run until ended. Checking in ends it the day before.
+                              {running && ` The current ${running.type} ends the day before the new start.`}
+                            </p>
+                          </div>
+                        </>
+                      )}
+                      {x.dutyAction === 'end' && running && (
+                        <div>
+                          <label className={labelCls}>Last Day *</label>
+                          <input
+                            type="date"
+                            required
+                            value={x.dutyEnd}
+                            min={running.startDate}
+                            onChange={(e) => setX({ dutyEnd: e.target.value })}
+                            className={`${fieldCls} font-mono`}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Exit: resignation / termination, or cancelling one */}
+                <div className={sectionClass}>
+                  <h4 className={headClass}>Exit</h4>
+                  {editingEmployee.lastWorkingDay && (
+                    <p className={hintCls}>
+                      {editingEmployee.exitType || 'Leaving'} · last working day {editingEmployee.lastWorkingDay}
+                      {editingEmployee.exitReason ? ` · ${editingEmployee.exitReason}` : ''}
+                    </p>
+                  )}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className={labelCls}>Change</label>
+                      <select
+                        value={x.exitAction}
+                        onChange={(e) => setX({ exitAction: e.target.value as typeof x.exitAction })}
+                        className={fieldCls}
+                      >
+                        <option value="">No change</option>
+                        {editingEmployee.lastWorkingDay ? (
+                          <option value="cancel">Cancel exit (keep employed)</option>
+                        ) : (
+                          <>
+                            <option value="Resigned">Resigned</option>
+                            <option value="Terminated">Terminated</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+                    {(x.exitAction === 'Resigned' || x.exitAction === 'Terminated') && (
+                      <>
+                        <div>
+                          <label className={labelCls}>Last Working Day *</label>
+                          <input
+                            type="date"
+                            required
+                            value={x.lastWorkingDay}
+                            min={editingEmployee.joiningDate}
+                            onChange={(e) => setX({ lastWorkingDay: e.target.value })}
+                            className={`${fieldCls} font-mono`}
+                          />
+                        </div>
+                        <div>
+                          <label className={labelCls}>Reason *</label>
+                          <input
+                            required
+                            value={x.exitReason}
+                            onChange={(e) => setX({ exitReason: e.target.value })}
+                            placeholder="Reason for leaving"
+                            className={fieldCls}
+                          />
+                        </div>
+                        <p className={`${hintCls} sm:col-span-3`}>
+                          Drops off attendance after {x.lastWorkingDay} and becomes Inactive the day after. Attendance,
+                          payroll and payslips are kept; the last month is paid up to that day.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+
           <div className="flex items-center justify-end gap-3 pt-3">
             <button
               type="button"
@@ -1060,12 +1299,16 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
               Documents
             </button>
             {canEdit && (
-              <div className="ml-auto">
-                <EmployeeActionsMenu
-                  employee={viewingEmployee}
-                  onSelect={(kind, employee) => setAction({ kind, employee })}
-                />
-              </div>
+              <button
+                onClick={() => {
+                  const emp = viewingEmployee;
+                  setViewingEmployee(null);
+                  handleOpenEdit(emp);
+                }}
+                className="ml-auto px-3 py-1.5 inline-flex items-center gap-1.5 text-xs font-semibold bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-200 rounded-lg hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors cursor-pointer"
+              >
+                <Edit2 className="w-3.5 h-3.5" /> Edit Employee
+              </button>
             )}
           </div>
 
@@ -1167,12 +1410,9 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
           {/* History: changes and duty periods */}
           {profileTab === 'history' && (
             <EmployeeHistoryView
-              employee={viewingEmployee}
               history={history.filter((h) => h.employeeId === viewingEmployee.id)}
               periods={dutyPeriods.filter((p) => p.employeeId === viewingEmployee.id)}
               shifts={shifts}
-              canEdit={canEdit}
-              onChanged={loadEmployees}
             />
           )}
 
@@ -1347,18 +1587,6 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             </div>
           )}
         </Modal>
-      )}
-
-      {/* Employee Actions dialog */}
-      {action && (
-        <EmployeeActionModal
-          kind={action.kind}
-          employee={action.employee}
-          shifts={shifts}
-          departments={departments}
-          onClose={() => setAction(null)}
-          onSaved={loadEmployees}
-        />
       )}
 
       {/* Deactivate confirmation dialog */}

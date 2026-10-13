@@ -121,7 +121,7 @@ export const SitesPage: React.FC = () => {
 
   const toggleStatus = (site: Site) => {
     if (site.status === 'Active' && staffAt(site.id).length) {
-      error('Site in use', `Move the ${staffAt(site.id).length} employee(s) at ${site.name} first (Employee Actions → Transfer).`);
+      error('Site in use', `Move the ${staffAt(site.id).length} employee(s) at ${site.name} first (Assign employees on another site, or Edit Employee).`);
       return;
     }
     const status = site.status === 'Active' ? 'Inactive' : 'Active';
@@ -246,7 +246,7 @@ export const SitesPage: React.FC = () => {
       {unassigned.length > 0 && (
         <div className="p-4 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-950/20 text-xs text-amber-800 dark:text-amber-300">
           <span className="font-semibold">{unassigned.length} active employee{unassigned.length === 1 ? ' has' : 's have'} no site yet:</span>{' '}
-          {unassigned.map((e) => e.name).join(', ')}. Use &ldquo;Assign employees&rdquo; on a site, the employee form, or Employee Actions → Transfer.
+          {unassigned.map((e) => e.name).join(', ')}. Use &ldquo;Assign employees&rdquo; on a site, or set the Site in Edit Employee.
         </div>
       )}
 

@@ -1,14 +1,12 @@
 import React, { useState } from 'react';
-import { ArrowRight, CalendarX } from 'lucide-react';
-import { DutyPeriod, Employee, EmployeeHistoryEntry, EmployeeHistoryValues, Shift } from '../../types';
+import { ArrowRight } from 'lucide-react';
+import { DutyPeriod, EmployeeHistoryEntry, EmployeeHistoryValues, Shift } from '../../types';
 import { Badge } from '../common/Badge';
-import { useAuth } from '../../context/AuthContext';
-import { useNotification } from '../../context/NotificationContext';
 import { useSettings } from '../../context/SettingsContext';
-import { endDutyPeriod, isPeriodRunning } from '../../services/employeeActionsService';
+import { isPeriodRunning } from '../../services/employeeActionsService';
 import { storageService } from '../../services/storageService';
 import { siteNameOf } from '../../utils/sites';
-import { addDaysStr, todayStr } from '../../utils/dateUtils';
+import { todayStr } from '../../utils/dateUtils';
 
 const FIELD_LABEL: Record<keyof EmployeeHistoryValues, string> = {
   department: 'Department',
@@ -31,21 +29,15 @@ const TYPE_STYLE: Record<EmployeeHistoryEntry['type'], string> = {
 };
 
 interface Props {
-  employee: Employee;
   history: EmployeeHistoryEntry[];
   periods: DutyPeriod[];
   shifts: Shift[];
-  canEdit: boolean;
-  onChanged: () => void;
 }
 
-/** Profile "History" tab: every recorded change, newest first, plus duty periods. */
-export const EmployeeHistoryView: React.FC<Props> = ({ employee, history, periods, shifts, canEdit, onChanged }) => {
-  const { user } = useAuth();
-  const { success, error } = useNotification();
+/** Profile "History" tab (read-only): every recorded change, newest first, plus duty periods. Changes are made in Edit Employee. */
+export const EmployeeHistoryView: React.FC<Props> = ({ history, periods, shifts }) => {
   const { formatMoney } = useSettings();
   const today = todayStr();
-  const [ending, setEnding] = useState<{ period: DutyPeriod; date: string } | null>(null);
   const [sites] = useState(() => storageService.getSites());
 
   const formatValue = (key: keyof EmployeeHistoryValues, value: unknown) => {
@@ -63,22 +55,6 @@ export const EmployeeHistoryView: React.FC<Props> = ({ employee, history, period
 
   const periodState = (p: DutyPeriod) =>
     p.startDate > today ? 'Scheduled' : isPeriodRunning(p, today) ? 'Running' : 'Ended';
-
-  const openEnd = (p: DutyPeriod) =>
-    setEnding({ period: p, date: p.startDate <= addDaysStr(today, -1) ? addDaysStr(today, -1) : p.startDate });
-
-  const handleEnd = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!ending) return;
-    try {
-      endDutyPeriod(ending.period, ending.date, user?.name || 'Manager');
-      success('Period ended', `${ending.period.type} for ${employee.name} ends on ${ending.date}.`);
-      setEnding(null);
-      onChanged();
-    } catch (err) {
-      error('Not saved', err instanceof Error ? err.message : 'Something went wrong.');
-    }
-  };
 
   return (
     <div className="space-y-5 text-xs">
@@ -98,7 +74,7 @@ export const EmployeeHistoryView: React.FC<Props> = ({ employee, history, period
                   <th className="py-2 px-3">Period</th>
                   <th className="py-2 px-3">Note</th>
                   <th className="py-2 px-3">State</th>
-                  {canEdit && <th className="py-2 px-3 text-right">Action</th>}
+
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
@@ -132,18 +108,6 @@ export const EmployeeHistoryView: React.FC<Props> = ({ employee, history, period
                           {state}
                         </span>
                       </td>
-                      {canEdit && (
-                        <td className="py-2 px-3 text-right">
-                          {state !== 'Ended' && (
-                            <button
-                              onClick={() => openEnd(p)}
-                              className="px-2 py-1 rounded-lg text-[11px] font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 inline-flex items-center gap-1 cursor-pointer"
-                            >
-                              <CalendarX className="w-3.5 h-3.5" /> End period
-                            </button>
-                          )}
-                        </td>
-                      )}
                     </tr>
                   );
                 })}
@@ -152,65 +116,6 @@ export const EmployeeHistoryView: React.FC<Props> = ({ employee, history, period
           </div>
         )}
       </div>
-
-      {ending && (
-        <div className="p-4 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/40 dark:bg-rose-950/20 animate-fade-in">
-          <h4 className="font-semibold text-neutral-900 dark:text-neutral-100">
-            End {ending.period.type}{' '}
-            <span className="font-normal text-neutral-400">· started {ending.period.startDate}</span>
-          </h4>
-          <form onSubmit={handleEnd} className="space-y-4 mt-3">
-            <div>
-              <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
-                Last day of the period *
-              </label>
-              <input
-                type="date"
-                required
-                value={ending.date}
-                min={ending.period.startDate}
-                onChange={(e) => setEnding({ ...ending, date: e.target.value })}
-                className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100 font-mono"
-              />
-              <div className="flex gap-2 mt-2">
-                {[
-                  ['Yesterday', addDaysStr(today, -1)],
-                  ['Today', today],
-                ]
-                  .filter(([, d]) => d >= ending.period.startDate)
-                  .map(([label, d]) => (
-                    <button
-                      key={label}
-                      type="button"
-                      onClick={() => setEnding({ ...ending, date: d })}
-                      className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700 cursor-pointer"
-                    >
-                      {label}
-                    </button>
-                  ))}
-              </div>
-              <p className="text-[11px] text-neutral-400 mt-2">
-                Days after this go back to normal attendance (Absent until marked).
-              </p>
-            </div>
-            <div className="flex items-center justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => setEnding(null)}
-                className="px-4 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors shadow-xs"
-              >
-                End Period
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
 
       {/* Change history */}
       <div>

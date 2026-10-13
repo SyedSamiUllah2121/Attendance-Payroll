@@ -11,7 +11,8 @@ import { storageService } from './storageService';
 import { addDaysStr, todayStr } from '../utils/dateUtils';
 
 /**
- * Employee Actions (transfer, promotion / salary revision, exit, duty periods).
+ * Employee changes made from the Edit Employee dialog (saveEmployeeEdit) and the Sites page:
+ * transfer, promotion / salary revision, status, exit and duty periods.
  * Each action writes its history row and the employee / period change together inside
  * storageService.transaction, so a failure leaves nothing half-saved.
  *
@@ -108,36 +109,6 @@ export const transferEmployee = (emp: Employee, input: TransferInput, by: string
     return entry;
   });
 
-export interface RevisionInput {
-  designation?: string;
-  basicSalary?: number;
-  effectiveDate: string;
-  note: string;
-}
-
-/**
- * Promotion (new designation, optionally with a raise) or Salary Revision (salary only).
- * Payroll pays each day at the salary in effect that day.
- */
-export const reviseEmployee = (emp: Employee, input: RevisionInput, by: string) =>
-  storageService.transaction(() => {
-    requireDate(input.effectiveDate, 'Effective date');
-    if (input.basicSalary !== undefined && !(input.basicSalary > 0)) {
-      throw new Error('Basic salary must be greater than zero.');
-    }
-    const designationChanges = Boolean(input.designation?.trim()) && input.designation!.trim() !== emp.designation;
-    const entry = recordChange(
-      emp,
-      designationChanges ? 'Promotion' : 'Salary Revision',
-      { designation: input.designation?.trim(), basicSalary: input.basicSalary },
-      input.effectiveDate,
-      input.note,
-      by
-    );
-    if (!entry) throw new Error('Enter a new designation or a new basic salary.');
-    return entry;
-  });
-
 export interface ExitInput {
   exitType: ExitType;
   lastWorkingDay: string;
@@ -218,38 +189,6 @@ export const setEmployeeStatus = (emp: Employee, status: Employee['status'], not
     return entry;
   });
 
-/**
- * History for edits made in the Edit Employee form (effective today), so changes made
- * there show in the History tab too. Call before saving the edited employee.
- */
-export const recordProfileEdit = (before: Employee, after: Employee, by: string) => {
-  const rows: [EmployeeHistoryType, EmployeeHistoryValues][] = [
-    ['Transfer', { department: after.department, shiftId: after.shiftId, siteId: after.siteId }],
-    ['Promotion', { designation: after.designation }],
-    ['Salary Revision', { basicSalary: after.basicSalary }],
-    ['Status Change', { status: after.status }],
-  ];
-  const now = new Date().toISOString();
-  const entries: EmployeeHistoryEntry[] = [];
-  rows.forEach(([type, changes]) => {
-    const { oldValue, newValue, changed } = diff(before, changes);
-    if (!changed) return;
-    entries.push({
-      id: newId('hist'),
-      employeeId: before.id,
-      type,
-      effectiveDate: todayStr(),
-      oldValue,
-      newValue,
-      note: 'Edited in employee profile',
-      createdBy: by,
-      createdAt: now,
-      appliedAt: now,
-    });
-  });
-  if (entries.length) storageService.saveEmployeeHistory([...storageService.getEmployeeHistory(), ...entries]);
-};
-
 export interface DutyPeriodInput {
   type: DutyPeriodType;
   startDate: string;
@@ -309,3 +248,96 @@ export const endDutyPeriod = (period: DutyPeriod, endDate: string, by: string) =
 
 /** True when the period has not ended by the given day. */
 export const isPeriodRunning = (p: DutyPeriod, date = todayStr()) => !p.endDate || p.endDate >= date;
+
+export interface EmployeeEditInput {
+  /** The record as edited in the form. */
+  edited: Employee;
+  /** When site / department / shift / designation / salary changes take effect. */
+  effectiveDate: string;
+  note: string;
+  duty?: { action: DutyPeriodType | 'end'; startDate: string; endDate: string; note: string };
+  exit?: { action: ExitType | 'cancel'; lastWorkingDay: string; reason: string };
+}
+
+/** Fields that change only through history (so past dates and payroll can see the old value). */
+const TRACKED_FIELDS = ['department', 'designation', 'shiftId', 'siteId', 'basicSalary', 'status'] as const;
+
+/**
+ * Saves the Edit Employee form in one transaction and returns what changed:
+ * - personal details (name, contact, bank...) at once,
+ * - site / department / shift as a Transfer and designation / salary as a Promotion or
+ *   Salary Revision, effective from input.effectiveDate (scheduled when dated ahead),
+ * - a status change, an exit (or cancelling one), and starting or ending a duty period.
+ */
+export const saveEmployeeEdit = (before: Employee, input: EmployeeEditInput, by: string): string[] =>
+  storageService.transaction(() => {
+    const { edited, effectiveDate, note } = input;
+    const fresh = () => storageService.getEmployeeById(before.id) || before;
+    const done: string[] = [];
+
+    // 1. Personal details; tracked fields keep their current value here
+    const personal: Employee = { ...edited };
+    TRACKED_FIELDS.forEach((key) => ((personal as unknown as Record<string, unknown>)[key] = before[key]));
+    personal.lastWorkingDay = before.lastWorkingDay;
+    personal.exitType = before.exitType;
+    personal.exitReason = before.exitReason;
+    storageService.updateEmployee(personal);
+
+    // 2. Job and salary changes, logged in history
+    const transfer = { department: edited.department, shiftId: edited.shiftId, siteId: edited.siteId };
+    const revision = { designation: edited.designation, basicSalary: edited.basicSalary };
+    if (diff(before, transfer).changed || diff(before, revision).changed) {
+      requireDate(effectiveDate, 'Effective date');
+      if (before.joiningDate && effectiveDate < before.joiningDate) {
+        throw new Error('Changes cannot take effect before the joining date.');
+      }
+      const t = recordChange(fresh(), 'Transfer', transfer, effectiveDate, note, by);
+      if (t) done.push(t.appliedAt ? 'Transfer' : `Transfer (from ${effectiveDate})`);
+      const type = edited.designation !== before.designation ? 'Promotion' : 'Salary Revision';
+      const r = recordChange(fresh(), type, revision, effectiveDate, note, by);
+      if (r) done.push(r.appliedAt ? type : `${type} (from ${effectiveDate})`);
+    }
+
+    // 3. Status
+    if (edited.status !== before.status) {
+      setEmployeeStatus(fresh(), edited.status, note || 'Changed in employee profile', by);
+      done.push(`Status ${edited.status}`);
+    }
+
+    // 4. Exit
+    if (input.exit?.action === 'cancel') {
+      setEmployeeStatus(fresh(), 'Active', 'Exit cancelled', by);
+      done.push('Exit cancelled');
+    } else if (input.exit) {
+      exitEmployee(
+        fresh(),
+        { exitType: input.exit.action, lastWorkingDay: input.exit.lastWorkingDay, reason: input.exit.reason },
+        by
+      );
+      done.push(`${input.exit.action}, last day ${input.exit.lastWorkingDay}`);
+    }
+
+    // 5. Duty period
+    if (input.duty?.action === 'end') {
+      const period = storageService
+        .getDutyPeriods()
+        .find((p) => p.employeeId === before.id && isPeriodRunning(p, todayStr()));
+      if (!period) throw new Error('There is no running duty period to end.');
+      endDutyPeriod(period, input.duty.endDate, by);
+      done.push(`${period.type} ends ${input.duty.endDate}`);
+    } else if (input.duty) {
+      startDutyPeriod(
+        fresh(),
+        {
+          type: input.duty.action,
+          startDate: input.duty.startDate,
+          endDate: input.duty.endDate || undefined,
+          note: input.duty.note,
+        },
+        by
+      );
+      done.push(`${input.duty.action} from ${input.duty.startDate}`);
+    }
+
+    return done;
+  });
