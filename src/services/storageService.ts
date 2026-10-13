@@ -1,13 +1,16 @@
 import {
   AppSettings,
   AttendanceRecord,
+  DutyPeriod,
   Employee,
+  EmployeeHistoryEntry,
   Holiday,
   LeaveRequest,
   Loan,
   PayrollRun,
   RegularizationRequest,
   Shift,
+  Site,
   UserAccount,
 } from '../types';
 import {
@@ -19,10 +22,12 @@ import {
   defaultRegularizations,
   defaultSettings,
   defaultShifts,
+  defaultSites,
   generateSeedAttendance,
   generateSeedPayrolls,
 } from '../data/seedData';
-import { evaluateAttendanceStatus, resolveUnmarkedDay } from '../utils/attendanceEngine';
+import { evaluateAttendanceStatus, periodCovers, resolveUnmarkedDay } from '../utils/attendanceEngine';
+import { makeEmployeeOnDate } from '../utils/employeeTimeline';
 import { addDaysStr, monthStartStr, todayStr } from '../utils/dateUtils';
 
 const STORAGE_KEYS = {
@@ -41,6 +46,11 @@ const STORAGE_KEYS = {
   LEAVE_POLICY_V2: 'workpulse_leave_policy_v2',
   DEMO_LOGINS_V2: 'workpulse_demo_logins_v2',
   OPEN_SEED_DAY_V1: 'workpulse_open_seed_day_v1',
+  EMPLOYEE_HISTORY: 'workpulse_employee_history',
+  DUTY_PERIODS: 'workpulse_duty_periods',
+  EMPLOYEE_ACTIONS_V1: 'workpulse_employee_actions_v1',
+  SITES: 'workpulse_sites',
+  SITES_ASSIGNED_V1: 'workpulse_sites_assigned_v1',
 };
 
 const AUTO_NOTES: Record<string, string> = {
@@ -48,7 +58,13 @@ const AUTO_NOTES: Record<string, string> = {
   Weekend: 'Off day for this shift',
   Holiday: 'Holiday',
   'On Leave': 'Approved leave',
+  'On Duty': 'Field duty',
+  WFH: 'Working from home',
+  Suspended: 'Suspended',
 };
+
+/** Statuses that mean the employee turned up for work (these end a running duty period). */
+const WORKED_STATUSES: AttendanceRecord['status'][] = ['Present', 'Late', 'Half Day'];
 
 class StorageService {
   constructor() {
@@ -65,7 +81,96 @@ class StorageService {
     this.migrateAnnualLeavePolicy();
     this.migrateDemoLogins();
     this.migrateOpenSeedDay();
+    this.migrateEmployeeActions();
+    this.migrateSites();
     this.syncAttendance();
+  }
+
+  /** One-time: create the employee history and duty period tables. */
+  private migrateEmployeeActions(): void {
+    if (localStorage.getItem(STORAGE_KEYS.EMPLOYEE_ACTIONS_V1)) return;
+    if (!localStorage.getItem(STORAGE_KEYS.EMPLOYEE_HISTORY)) localStorage.setItem(STORAGE_KEYS.EMPLOYEE_HISTORY, '[]');
+    if (!localStorage.getItem(STORAGE_KEYS.DUTY_PERIODS)) localStorage.setItem(STORAGE_KEYS.DUTY_PERIODS, '[]');
+    localStorage.setItem(STORAGE_KEYS.EMPLOYEE_ACTIONS_V1, '1');
+  }
+
+  /** One-time: create the sites table with the example sites and place existing staff in them. */
+  private migrateSites(): void {
+    if (!localStorage.getItem(STORAGE_KEYS.SITES)) {
+      localStorage.setItem(STORAGE_KEYS.SITES, JSON.stringify(defaultSites));
+    }
+    if (localStorage.getItem(STORAGE_KEYS.SITES_ASSIGNED_V1)) return;
+    this.assignUnplacedToSites();
+    localStorage.setItem(STORAGE_KEYS.SITES_ASSIGNED_V1, '1');
+  }
+
+  /**
+   * Gives every employee without a site one of the active sites, keeping each department
+   * together (departments in name order, spread across the sites). Initial placement, so no
+   * history row; later moves are Transfers.
+   */
+  private assignUnplacedToSites(): void {
+    const sites = this.getSites().filter((s) => s.status === 'Active');
+    if (!sites.length) return;
+    const employees = this.getEmployees();
+    const departments = Array.from(new Set(employees.map((e) => e.department))).sort();
+    let changed = false;
+    const next = employees.map((e) => {
+      if (e.siteId) return e;
+      changed = true;
+      return { ...e, siteId: sites[departments.indexOf(e.department) % sites.length].id };
+    });
+    if (changed) localStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(next));
+  }
+
+  /**
+   * Runs several writes as one unit: if fn throws, every table is put back as it was.
+   * localStorage has no transactions, so this snapshots the app's keys first.
+   */
+  public transaction<T>(fn: () => T): T {
+    const snapshot = Object.values(STORAGE_KEYS).map((key) => [key, localStorage.getItem(key)] as const);
+    try {
+      return fn();
+    } catch (err) {
+      snapshot.forEach(([key, value]) => {
+        if (value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Applies history rows whose effective date has arrived (a transfer or revision dated ahead
+   * is saved straight away but only written to the employee on that date), and turns exited
+   * staff Inactive the day after their last working day. Writes employees directly: going
+   * through saveEmployees would re-enter the sync.
+   */
+  private applyDueEmployeeChanges(today: string): void {
+    const history = this.getEmployeeHistory();
+    let employees = this.getEmployees();
+    let changed = false;
+
+    const due = history
+      .filter((h) => !h.appliedAt && h.effectiveDate <= today)
+      .sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate) || a.createdAt.localeCompare(b.createdAt));
+    if (due.length) {
+      const now = new Date().toISOString();
+      due.forEach((h) => {
+        employees = employees.map((e) => (e.id === h.employeeId ? { ...e, ...h.newValue } : e));
+        h.appliedAt = now;
+      });
+      localStorage.setItem(STORAGE_KEYS.EMPLOYEE_HISTORY, JSON.stringify(history));
+      changed = true;
+    }
+
+    employees = employees.map((e) => {
+      if (e.status !== 'Active' || !e.lastWorkingDay || e.lastWorkingDay >= today) return e;
+      changed = true;
+      return { ...e, status: 'Inactive' };
+    });
+
+    if (changed) localStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(employees));
   }
 
   private lastSyncDay = '';
@@ -82,12 +187,17 @@ class StorageService {
     if (typeof window === 'undefined') return;
     const today = todayStr();
     this.lastSyncDay = today;
+    this.applyDueEmployeeChanges(today);
 
     const records = this.getAttendanceRaw();
-    const employees = this.getEmployees().filter((e) => e.status === 'Active');
+    // Active staff, plus exited staff (their days up to the last working day still get filled).
+    const employees = this.getEmployees().filter((e) => e.status === 'Active' || e.lastWorkingDay);
     const shifts = this.getShifts();
     const holidays = this.getHolidays();
     const leaves = this.getLeaves();
+    const dutyPeriods = this.getDutyPeriods();
+    const employeeOn = makeEmployeeOnDate(this.getEmployeeHistory());
+    const lastDayOf = new Map(employees.filter((e) => e.lastWorkingDay).map((e) => [e.id, e.lastWorkingDay!]));
 
     const byKey = new Map<string, AttendanceRecord>();
     const firstDateByEmp = new Map<string, string>();
@@ -112,8 +222,13 @@ class StorageService {
       autoMarked: true,
     });
 
+    // Auto-filled days after someone's last working day no longer apply.
+    records.forEach((r) => {
+      const lastDay = lastDayOf.get(r.employeeId);
+      if (r.autoMarked && lastDay && r.date > lastDay) remove.add(r);
+    });
+
     for (const emp of employees) {
-      const shift = shifts.find((s) => s.id === emp.shiftId) || shifts[0];
       // Start where this employee's records start. An employee with no records yet starts
       // at their joining date, but never before the current month.
       let start = firstDateByEmp.get(emp.id);
@@ -122,13 +237,17 @@ class StorageService {
         start = emp.joiningDate && emp.joiningDate > monthStart ? emp.joiningDate : monthStart;
       }
       if (emp.joiningDate && emp.joiningDate > start) start = emp.joiningDate;
+      const end = emp.lastWorkingDay && emp.lastWorkingDay < today ? emp.lastWorkingDay : today;
 
-      for (let date = start; date <= today; date = addDaysStr(date, 1)) {
+      for (let date = start; date <= end; date = addDaysStr(date, 1)) {
         const existing = byKey.get(`${emp.id}|${date}`);
         if (existing && !existing.autoMarked) continue;
 
-        const status = resolveUnmarkedDay(emp, shift, date, holidays, leaves, today);
-        if (status === 'Pending' || status === 'Upcoming' || status === 'Not Joined') {
+        // The shift they were on that day (a transfer only changes days from its effective date).
+        const asOf = employeeOn(emp, date);
+        const shift = shifts.find((s) => s.id === asOf.shiftId) || shifts[0];
+        const status = resolveUnmarkedDay(emp, shift, date, holidays, leaves, today, dutyPeriods);
+        if (status === 'Pending' || status === 'Upcoming' || status === 'Not Joined' || status === 'Exited') {
           // e.g. a holiday was removed from today: drop the stale auto record.
           if (existing) remove.add(existing);
           continue;
@@ -239,6 +358,12 @@ class StorageService {
     localStorage.setItem(STORAGE_KEYS.REGULARIZATIONS, JSON.stringify(defaultRegularizations));
     localStorage.setItem(STORAGE_KEYS.LOANS, JSON.stringify(defaultLoans));
     localStorage.setItem(STORAGE_KEYS.PAYROLLS, JSON.stringify(payrolls));
+    localStorage.setItem(STORAGE_KEYS.EMPLOYEE_HISTORY, '[]');
+    localStorage.setItem(STORAGE_KEYS.DUTY_PERIODS, '[]');
+    localStorage.setItem(STORAGE_KEYS.EMPLOYEE_ACTIONS_V1, '1');
+    localStorage.setItem(STORAGE_KEYS.SITES, JSON.stringify(defaultSites));
+    this.assignUnplacedToSites();
+    localStorage.setItem(STORAGE_KEYS.SITES_ASSIGNED_V1, '1');
     localStorage.setItem(STORAGE_KEYS.SEEDED_VERSION, '3.0.0');
     // Fresh demo data has no stale "live" day to close.
     localStorage.setItem(STORAGE_KEYS.OPEN_SEED_DAY_V1, '1');
@@ -336,6 +461,27 @@ class StorageService {
       list.push(record);
     }
     this.saveAttendance(list);
+    if (record.checkIn || WORKED_STATUSES.includes(record.status)) {
+      this.endDutyPeriodForWork(record.employeeId, record.date);
+    }
+  }
+
+  /**
+   * The employee checked in or was marked present on dateStr: a Field Duty / WFH / Suspension
+   * period covering that day ends the day before (one that started that day is removed).
+   * Call after saving attendance outside saveOrUpdateAttendanceRecord.
+   */
+  public endDutyPeriodForWork(employeeId: string, dateStr: string): void {
+    const periods = this.getDutyPeriods();
+    const period = periods.find((p) => p.employeeId === employeeId && periodCovers(p, dateStr));
+    if (!period) return;
+    const next =
+      period.startDate === dateStr
+        ? periods.filter((p) => p !== period)
+        : periods.map((p) =>
+            p === period ? { ...p, endDate: addDaysStr(dateStr, -1), endedBy: 'Attendance marked' } : p
+          );
+    this.saveDutyPeriods(next);
   }
 
   // --- Leaves ---
@@ -400,6 +546,40 @@ class StorageService {
   public updateLoan(loan: Loan): void {
     const list = this.getLoans().map((l) => (l.id === loan.id ? loan : l));
     this.saveLoans(list);
+  }
+
+  // --- Sites (work locations) ---
+  public getSites(): Site[] {
+    const data = localStorage.getItem(STORAGE_KEYS.SITES);
+    return data ? JSON.parse(data) : defaultSites;
+  }
+
+  public saveSites(sites: Site[]): void {
+    localStorage.setItem(STORAGE_KEYS.SITES, JSON.stringify(sites));
+  }
+
+  // --- Employee history (one row per change) ---
+  public getEmployeeHistory(): EmployeeHistoryEntry[] {
+    const data = localStorage.getItem(STORAGE_KEYS.EMPLOYEE_HISTORY);
+    return data ? JSON.parse(data) : [];
+  }
+
+  public saveEmployeeHistory(history: EmployeeHistoryEntry[]): void {
+    localStorage.setItem(STORAGE_KEYS.EMPLOYEE_HISTORY, JSON.stringify(history));
+  }
+
+  // --- Duty periods (Field Duty / WFH / Suspension) ---
+  public getDutyPeriods(): DutyPeriod[] {
+    const data = localStorage.getItem(STORAGE_KEYS.DUTY_PERIODS);
+    return data ? JSON.parse(data) : [];
+  }
+
+  /** Saves the periods and re-derives the auto-filled attendance they cover. */
+  public saveDutyPeriods(periods: DutyPeriod[]): void {
+    const invalid = periods.find((p) => p.endDate && p.endDate < p.startDate);
+    if (invalid) throw new Error(`A ${invalid.type} period cannot end before it starts.`);
+    localStorage.setItem(STORAGE_KEYS.DUTY_PERIODS, JSON.stringify(periods));
+    this.syncAttendance();
   }
 
   // --- User accounts ---

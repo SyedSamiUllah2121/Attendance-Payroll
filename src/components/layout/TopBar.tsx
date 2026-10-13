@@ -137,6 +137,7 @@ export const TopBar: React.FC<TopBarProps> = ({
     analytics: 'Analytics & Insights',
     shifts: 'Shift Schedules',
     holidays: 'Holidays Calendar',
+    sites: 'Sites',
     reports: 'Reports & Exports',
     settings: 'Company Settings',
   };

@@ -43,6 +43,20 @@ export const Badge: React.FC<BadgeProps> = ({ status, className = '', size = 'sm
     case 'Weekend':
       colorStyles = 'bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border-purple-200/80 dark:border-purple-800/80';
       break;
+
+    case 'On Duty':
+    case 'Field Duty':
+      colorStyles = 'bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border-teal-200/80 dark:border-teal-800/80';
+      break;
+
+    case 'WFH':
+      colorStyles = 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200/80 dark:border-indigo-800/80';
+      break;
+
+    case 'Suspended':
+    case 'Suspension':
+      colorStyles = 'bg-orange-50 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300 border-orange-200/80 dark:border-orange-800/80';
+      break;
   }
 
   const sizeStyles = size === 'sm' ? 'px-2 py-0.5 text-xs' : 'px-2.5 py-1 text-xs';

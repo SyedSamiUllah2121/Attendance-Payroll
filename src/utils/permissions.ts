@@ -21,6 +21,7 @@ export type Permission =
   | 'loans.manage'
   | 'shifts.manage'
   | 'holidays.manage'
+  | 'sites.manage' // work sites (Dubai, London, ...)
   | 'analytics.view' // company-wide analytics
   | 'reports.view'
   | 'settings.manage'
@@ -43,6 +44,7 @@ const ALL: Permission[] = [
   'loans.manage',
   'shifts.manage',
   'holidays.manage',
+  'sites.manage',
   'analytics.view',
   'reports.view',
   'settings.manage',
@@ -135,6 +137,7 @@ export const PAGE_ACCESS: Record<string, { staff?: Permission; selfService: bool
   analytics: { staff: 'analytics.view', selfService: true },
   shifts: { staff: 'shifts.manage', selfService: false },
   holidays: { staff: 'holidays.manage', selfService: true },
+  sites: { staff: 'sites.manage', selfService: false },
   reports: { staff: 'reports.view', selfService: false },
   users: { staff: 'users.manage', selfService: false },
   settings: { staff: 'settings.manage', selfService: false },

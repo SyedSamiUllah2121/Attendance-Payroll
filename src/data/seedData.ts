@@ -9,6 +9,7 @@ import {
   PayrollRun,
   RegularizationRequest,
   Shift,
+  Site,
   UserAccount,
 } from '../types';
 import { calculateSalary } from '../utils/payrollEngine';
@@ -164,6 +165,13 @@ export const defaultShifts: Shift[] = [
     halfDayThresholdHours: 3.0,
     workingDays: [0, 6], // Sun, Sat
   },
+];
+
+/** Example work sites. Seeded staff are placed by department (storageService.assignUnplacedToSites). */
+export const defaultSites: Site[] = [
+  { id: 'site-dubai', name: 'Dubai', country: 'United Arab Emirates', status: 'Active' },
+  { id: 'site-london', name: 'London', country: 'United Kingdom', status: 'Active' },
+  { id: 'site-paris', name: 'Paris', country: 'France', status: 'Active' },
 ];
 
 export const defaultHolidays: Holiday[] = [

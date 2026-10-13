@@ -1,7 +1,19 @@
 import React, { useMemo, useState } from 'react';
 import { ArrowRight, FileSpreadsheet, Printer, Search } from 'lucide-react';
-import { AttendanceRecord, Employee, Holiday, LeaveRequest, LeaveType, Shift } from '../../types';
-import { resolveUnmarkedDay, UnmarkedDayStatus } from '../../utils/attendanceEngine';
+import {
+  AttendanceRecord,
+  DutyPeriod,
+  Employee,
+  EmployeeHistoryEntry,
+  Holiday,
+  LeaveRequest,
+  LeaveType,
+  Shift,
+} from '../../types';
+import { DutyStatus, resolveUnmarkedDay, UnmarkedDayStatus } from '../../utils/attendanceEngine';
+import { makeEmployeeOnDate } from '../../utils/employeeTimeline';
+import { siteNameOf } from '../../utils/sites';
+import { storageService } from '../../services/storageService';
 import { addDaysStr, currentMonthStr, monthEndStr, parseDateStr, todayStr } from '../../utils/dateUtils';
 import { useSettings } from '../../context/SettingsContext';
 import { useNotification } from '../../context/NotificationContext';
@@ -13,13 +25,28 @@ interface Props {
   attendance: AttendanceRecord[];
   holidays: Holiday[];
   leaves: LeaveRequest[];
+  dutyPeriods: DutyPeriod[];
+  /** Employee history, so each day uses the shift the employee was on then. */
+  history: EmployeeHistoryEntry[];
   canMark: boolean;
   /** Department filter and search; hidden when there is only one person to show. */
   showFilters: boolean;
   onEditDay: (emp: Employee, date: string, rec?: AttendanceRecord) => void;
 }
 
-type Tone = 'present' | 'late' | 'half' | 'absent' | 'leave' | 'holiday' | 'off' | 'pending' | 'empty';
+type Tone =
+  | 'present'
+  | 'late'
+  | 'half'
+  | 'absent'
+  | 'leave'
+  | 'duty'
+  | 'wfh'
+  | 'suspended'
+  | 'holiday'
+  | 'off'
+  | 'pending'
+  | 'empty';
 
 interface Cell {
   code: string;
@@ -54,6 +81,9 @@ const TONE_CLASS: Record<Tone, string> = {
   half: 'bg-orange-50 text-orange-700 dark:bg-orange-500/15 dark:text-orange-400',
   absent: 'bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400',
   leave: 'bg-sky-50 text-sky-700 dark:bg-sky-500/15 dark:text-sky-400',
+  duty: 'bg-teal-50 text-teal-700 dark:bg-teal-500/15 dark:text-teal-400',
+  wfh: 'bg-indigo-50 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-400',
+  suspended: 'bg-orange-100 text-orange-800 dark:bg-orange-500/20 dark:text-orange-300',
   holiday: 'bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-400',
   off: 'bg-neutral-100 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-500',
   pending: 'bg-neutral-50 text-amber-500 ring-1 ring-inset ring-amber-300 dark:bg-neutral-800/60 dark:ring-amber-600/60',
@@ -67,6 +97,9 @@ const TONE_PRINT: Record<Tone, string> = {
   half: '#ffedd5;color:#c2410c',
   absent: '#ffe4e6;color:#be123c',
   leave: '#e0f2fe;color:#0369a1',
+  duty: '#ccfbf1;color:#0f766e',
+  wfh: '#e0e7ff;color:#4338ca',
+  suspended: '#fed7aa;color:#9a3412',
   holiday: '#ede9fe;color:#6d28d9',
   off: '#f5f5f5;color:#a3a3a3',
   pending: '#fff;color:#d97706',
@@ -82,10 +115,19 @@ const LEGEND: { code: string; tone: Tone; label: string }[] = [
   { code: 'SL', tone: 'leave', label: 'Sick' },
   { code: 'CL', tone: 'leave', label: 'Casual' },
   { code: 'UL', tone: 'leave', label: 'Unpaid' },
+  { code: 'OD', tone: 'duty', label: 'On Duty' },
+  { code: 'WFH', tone: 'wfh', label: 'Work from home' },
+  { code: 'S', tone: 'suspended', label: 'Suspended' },
   { code: 'H', tone: 'holiday', label: 'Holiday' },
   { code: 'W', tone: 'off', label: 'Off day' },
   { code: '•', tone: 'pending', label: 'Not marked yet' },
 ];
+
+const DUTY_CELL: Record<DutyStatus, Cell> = {
+  'On Duty': { code: 'OD', tone: 'duty', label: 'On duty (field)' },
+  WFH: { code: 'WFH', tone: 'wfh', label: 'Working from home' },
+  Suspended: { code: 'S', tone: 'suspended', label: 'Suspended (unpaid)' },
+};
 
 const UNMARKED_LABEL: Record<UnmarkedDayStatus, string> = {
   Holiday: 'Holiday',
@@ -95,6 +137,10 @@ const UNMARKED_LABEL: Record<UnmarkedDayStatus, string> = {
   Pending: 'Not marked yet',
   Upcoming: 'Upcoming',
   'Not Joined': 'Before joining date',
+  'On Duty': 'On duty (field)',
+  WFH: 'Working from home',
+  Suspended: 'Suspended',
+  Exited: 'After last working day',
 };
 
 const fieldClass =
@@ -121,6 +167,8 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
   attendance,
   holidays,
   leaves,
+  dutyPeriods,
+  history,
   canMark,
   showFilters,
   onEditDay,
@@ -133,6 +181,8 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
   const [from, setFrom] = useState(`${initialMonth}-01`);
   const [to, setTo] = useState(monthEndStr(initialMonth));
   const [dept, setDept] = useState('');
+  const [site, setSite] = useState('');
+  const sites = useMemo(() => storageService.getSites(), []);
   const [search, setSearch] = useState('');
 
   // The month picker shows a month only while the range is exactly that month.
@@ -174,6 +224,9 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
   const holidayByDate = useMemo(() => new Map(holidays.map((h) => [h.date, h.name])), [holidays]);
 
   const shiftOf = (emp: Employee) => shifts.find((s) => s.id === emp.shiftId) || shifts[0];
+  const employeeOn = useMemo(() => makeEmployeeOnDate(history), [history]);
+  /** The shift the employee was on that day (a transfer applies from its effective date). */
+  const shiftOn = (emp: Employee, date: string) => shiftOf(employeeOn(emp, date));
 
   const leaveCodeOn = (empId: string, date: string) => {
     const leave = leaves.find(
@@ -205,14 +258,22 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
           return { code: 'H', tone: 'holiday', label: holidayByDate.get(date) || 'Holiday' };
         case 'Weekend':
           return { code: 'W', tone: 'off', label: 'Off day' };
+        case 'On Duty':
+        case 'WFH':
+        case 'Suspended':
+          return DUTY_CELL[rec.status];
       }
     }
-    const status = resolveUnmarkedDay(emp, shiftOf(emp), date, holidays, leaves, today);
+    const status = resolveUnmarkedDay(emp, shiftOn(emp, date), date, holidays, leaves, today, dutyPeriods);
     switch (status) {
       case 'Holiday':
         return { code: 'H', tone: 'holiday', label: holidayByDate.get(date) || 'Holiday' };
       case 'Weekend':
         return { code: 'W', tone: 'off', label: 'Off day' };
+      case 'On Duty':
+      case 'WFH':
+      case 'Suspended':
+        return DUTY_CELL[status];
       case 'On Leave': {
         const lv = leaveCodeOn(emp.id, date);
         return { code: lv.code, tone: 'leave', label: `${lv.type ? `${lv.type} leave` : 'Leave'} (approved)` };
@@ -230,6 +291,7 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
     const q = search.trim().toLowerCase();
     return employees
       .filter((emp) => !dept || emp.department === dept)
+      .filter((emp) => !site || (site === 'none' ? !emp.siteId : emp.siteId === site))
       .filter((emp) => !q || emp.name.toLowerCase().includes(q) || emp.id.toLowerCase().includes(q))
       .filter(
         (emp) =>
@@ -255,7 +317,7 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
         return { emp, cells, totals };
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employees, dept, search, dates, recordByKey, holidays, leaves, shifts, today]);
+  }, [employees, dept, site, search, dates, recordByKey, holidays, leaves, shifts, today, dutyPeriods, employeeOn]);
 
   const deptLabel = dept || 'All Departments';
   const periodLabel = month
@@ -274,6 +336,7 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
       'Employee ID',
       'Name',
       'Department',
+      'Site',
       ...dates.map((d) => d),
       'Present',
       'Late',
@@ -288,6 +351,7 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
         emp.id,
         emp.name,
         emp.department,
+        siteNameOf(sites, emp.siteId),
         ...cells.map((c) => (c.cell.code === '•' ? '' : c.cell.code)),
         totals.present,
         totals.late,
@@ -402,6 +466,17 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
                   {d}
                 </option>
               ))}
+            </select>
+          )}
+          {showFilters && (
+            <select value={site} onChange={(e) => setSite(e.target.value)} className={`${fieldClass} min-w-36`}>
+              <option value="">All Sites</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+              <option value="none">No site</option>
             </select>
           )}
           <input
@@ -546,6 +621,7 @@ export const MonthlyAttendanceGrid: React.FC<Props> = ({
                       </p>
                       <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate">
                         {emp.department}
+                        {siteNameOf(sites, emp.siteId) ? ` · ${siteNameOf(sites, emp.siteId)}` : ''}
                         {shift ? ` · ${shift.name}` : ''}
                         {emp.status !== 'Active' ? ' · Inactive' : ''}
                       </p>

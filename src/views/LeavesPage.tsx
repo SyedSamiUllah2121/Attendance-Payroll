@@ -20,6 +20,7 @@ import { Modal } from '../components/common/Modal';
 import { addDaysStr, parseDateStr, todayStr } from '../utils/dateUtils';
 import { computeAnnualLeave, getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
 import { reviewLeave } from '../services/approvalService';
+import { siteNameOf } from '../utils/sites';
 
 export const LeavesPage: React.FC = () => {
   const { user, isEmployee, can } = useAuth();
@@ -38,6 +39,8 @@ export const LeavesPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [typeFilter, setTypeFilter] = useState<string>('');
   const [deptFilter, setDeptFilter] = useState<string>('');
+  const [siteFilter, setSiteFilter] = useState<string>('');
+  const [sites] = useState(() => storageService.getSites());
 
   // Apply modal
   const [isApplyModalOpen, setIsApplyModalOpen] = useState(false);
@@ -251,6 +254,10 @@ export const LeavesPage: React.FC = () => {
       const emp = employees.find((e) => e.id === l.employeeId);
       if (emp?.department !== deptFilter) return false;
     }
+    if (siteFilter) {
+      const emp = employees.find((e) => e.id === l.employeeId);
+      if (siteFilter === 'none' ? emp?.siteId : emp?.siteId !== siteFilter) return false;
+    }
     return true;
   });
 
@@ -400,12 +407,29 @@ export const LeavesPage: React.FC = () => {
             </select>
           )}
 
-          {(statusFilter || typeFilter || deptFilter) && (
+          {canViewAll && (
+            <select
+              value={siteFilter}
+              onChange={(e) => setSiteFilter(e.target.value)}
+              className="px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-700 dark:text-neutral-300"
+            >
+              <option value="">All Sites</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+              <option value="none">No site</option>
+            </select>
+          )}
+
+          {(statusFilter || typeFilter || deptFilter || siteFilter) && (
             <button
               onClick={() => {
                 setStatusFilter('');
                 setTypeFilter('');
                 setDeptFilter('');
+                setSiteFilter('');
               }}
               className="text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
             >
@@ -460,7 +484,10 @@ export const LeavesPage: React.FC = () => {
                             <p className="font-semibold text-neutral-900 dark:text-neutral-100">
                               {emp?.name || lv.employeeId}
                             </p>
-                            <span className="text-[11px] text-neutral-400">{lv.employeeId}</span>
+                            <span className="text-[11px] text-neutral-400">
+                              {lv.employeeId}
+                              {siteNameOf(sites, emp?.siteId) ? ` · ${siteNameOf(sites, emp?.siteId)}` : ''}
+                            </span>
                           </div>
                         </div>
                       </td>

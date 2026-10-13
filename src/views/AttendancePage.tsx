@@ -19,7 +19,9 @@ import {
 import {
   AttendanceRecord,
   AttendanceStatus,
+  DutyPeriod,
   Employee,
+  EmployeeHistoryEntry,
   Holiday,
   LeaveRequest,
   RegularizationRequest,
@@ -31,21 +33,36 @@ import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
-import { evaluateAttendanceStatus, resolveUnmarkedDay, UnmarkedDayStatus } from '../utils/attendanceEngine';
+import {
+  DayStatus,
+  evaluateAttendanceStatus,
+  isEmployedOn,
+  resolveDayStatus,
+  resolveUnmarkedDay,
+} from '../utils/attendanceEngine';
+import { makeEmployeeOnDate } from '../utils/employeeTimeline';
 import { addDaysStr, todayStr } from '../utils/dateUtils';
+import { siteNameOf } from '../utils/sites';
 
 const TIMED_STATUSES: AttendanceStatus[] = ['Present', 'Late', 'Half Day'];
 
-/** Label for a day with no saved record. */
-const UNMARKED_LABEL: Record<UnmarkedDayStatus, string> = {
-  Holiday: 'Holiday',
-  Weekend: 'Weekend',
-  'On Leave': 'On Leave',
-  Absent: 'Absent',
-  Pending: 'Not Marked',
-  Upcoming: 'Upcoming',
-  'Not Joined': 'Not Joined',
-};
+/** Statuses an unmarked day can be pre-filled with in the edit dialog. */
+const PREFILL_STATUSES: string[] = ['Holiday', 'Weekend', 'On Leave', 'On Duty', 'WFH', 'Suspended'];
+
+/** Daily view status filter. */
+const STATUS_FILTERS: DayStatus[] = [
+  'Present',
+  'Late',
+  'Half Day',
+  'Absent',
+  'Not Marked',
+  'On Leave',
+  'On Duty',
+  'WFH',
+  'Suspended',
+  'Holiday',
+  'Weekend',
+];
 
 /** Evaluate times against the shift, ignoring weekend/holiday so work on an off-day still counts. */
 const evaluateTimes = (checkIn: string, checkOut: string, shift: Shift, date: string) =>
@@ -95,6 +112,9 @@ export const AttendancePage: React.FC = () => {
   const today = todayStr();
   const [selectedDate, setSelectedDate] = useState(today);
   const [departmentFilter, setDepartmentFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<DayStatus | ''>('');
+  const [siteFilter, setSiteFilter] = useState('');
+  const [sites] = useState(() => storageService.getSites());
 
   // Switch tabs when asked while this page is already open (e.g. from the notification bell)
   useEffect(() => {
@@ -122,6 +142,8 @@ export const AttendancePage: React.FC = () => {
   const [regularizations, setRegularizations] = useState<RegularizationRequest[]>(() =>
     storageService.getRegularizations()
   );
+  const [dutyPeriods, setDutyPeriods] = useState<DutyPeriod[]>(() => storageService.getDutyPeriods());
+  const [history, setHistory] = useState<EmployeeHistoryEntry[]>(() => storageService.getEmployeeHistory());
 
   // Edit Single Record Modal
   const [editingRecord, setEditingRecord] = useState<{
@@ -160,22 +182,31 @@ export const AttendancePage: React.FC = () => {
     setLeaves(storageService.getLeaves());
     setAttendance(storageService.getAttendance());
     setRegularizations(storageService.getRegularizations());
+    setDutyPeriods(storageService.getDutyPeriods());
+    setHistory(storageService.getEmployeeHistory());
   };
 
   const shiftOf = (emp?: Employee) => shifts.find((s) => s.id === emp?.shiftId) || shifts[0];
   const ownEmployeeId = user?.employeeId;
+  // Department and shift as they were on a date (transfers apply from their effective date)
+  const employeeOn = makeEmployeeOnDate(history);
+  const shiftOn = (emp: Employee, date: string) => shiftOf(employeeOn(emp, date));
 
-  /** What a day with no record means for this employee (holiday, off day, leave, absent, not marked yet...). */
+  /** What a day with no record means for this employee (holiday, off day, leave, duty, absent, not marked yet...). */
   const unmarkedStatus = (emp: Employee, date: string) =>
-    resolveUnmarkedDay(emp, shiftOf(emp), date, holidays, leaves, today);
+    resolveUnmarkedDay(emp, shiftOn(emp, date), date, holidays, leaves, today, dutyPeriods);
+
+  /** Central day status (record, leave, duty period, holiday...); null when not on staff that day. */
+  const dayStatusOf = (emp: Employee, date: string, rec?: AttendanceRecord) =>
+    resolveDayStatus(emp, shiftOn(emp, date), date, rec, { holidays, leaves, dutyPeriods, today });
 
   /** Open the edit dialog for one employee-day, pre-filled from its record or the shift. */
   const openEditor = (emp: Employee, date: string, rec?: AttendanceRecord) => {
-    const shift = shiftOf(emp);
+    const shift = shiftOn(emp, date);
     const unmarked = rec ? undefined : unmarkedStatus(emp, date);
     let status: AttendanceStatus | '' = '';
     if (rec) status = rec.status;
-    else if (unmarked === 'Holiday' || unmarked === 'Weekend' || unmarked === 'On Leave') status = unmarked;
+    else if (unmarked && PREFILL_STATUSES.includes(unmarked)) status = unmarked as AttendanceStatus;
     setEditingRecord({
       employeeId: emp.id,
       employeeName: emp.name,
@@ -190,24 +221,34 @@ export const AttendancePage: React.FC = () => {
   // -------------------------------------------------------------
   // Daily View Computations
   // -------------------------------------------------------------
-  const filteredEmployees = employees.filter((emp) => {
-    if (isEmployee && emp.id !== ownEmployeeId) return false;
-    if (departmentFilter && emp.department !== departmentFilter) return false;
-    // Former staff only appear for periods where they still have attendance.
-    if (emp.status !== 'Active') {
-      return attendance.some((r) => r.employeeId === emp.id && r.date === selectedDate);
-    }
-    return true;
-  });
-
-  const visibleRegularizations = isEmployee
-    ? regularizations.filter((r) => r.employeeId === ownEmployeeId)
-    : regularizations;
-
   const dailyRecordsMap = new Map<string, AttendanceRecord>();
   attendance
     .filter((r) => r.date === selectedDate)
     .forEach((r) => dailyRecordsMap.set(r.employeeId, r));
+
+  // One row per employee on staff that day, with their department / shift as of that day
+  const dailyRows = employees
+    .filter((emp) => !isEmployee || emp.id === ownEmployeeId)
+    // Former staff only appear for periods where they still have attendance.
+    .filter((emp) => emp.status === 'Active' || dailyRecordsMap.has(emp.id))
+    .map((emp) => {
+      const rec = dailyRecordsMap.get(emp.id);
+      return {
+        emp,
+        asOf: employeeOn(emp, selectedDate),
+        rec,
+        status: dayStatusOf(emp, selectedDate, rec),
+      };
+    })
+    .filter((row): row is typeof row & { status: DayStatus } => row.status !== null)
+    .filter((row) => !departmentFilter || row.asOf.department === departmentFilter)
+    .filter((row) => !siteFilter || (siteFilter === 'none' ? !row.asOf.siteId : row.asOf.siteId === siteFilter));
+  const filteredRows = dailyRows.filter((row) => !statusFilter || row.status === statusFilter);
+  const filteredEmployees = filteredRows.map((row) => row.emp);
+
+  const visibleRegularizations = isEmployee
+    ? regularizations.filter((r) => r.employeeId === ownEmployeeId)
+    : regularizations;
 
   // Handle Save Manual Override
   const handleSaveOverride = (e: React.FormEvent) => {
@@ -215,7 +256,7 @@ export const AttendancePage: React.FC = () => {
     if (!editingRecord) return;
 
     const emp = employees.find((e) => e.id === editingRecord.employeeId);
-    const shift = shiftOf(emp);
+    const shift = emp ? shiftOn(emp, editingRecord.date) : shiftOf(emp);
     const timed = editingRecord.status === '' || TIMED_STATUSES.includes(editingRecord.status);
 
     if (editingRecord.date > today) {
@@ -277,20 +318,23 @@ export const AttendancePage: React.FC = () => {
       return;
     }
     const targets = employees.filter(
-      (e) => e.status === 'Active' && (!bulkDept || e.department === bulkDept)
+      (e) =>
+        e.status === 'Active' &&
+        isEmployedOn(e, bulkDate) &&
+        (!bulkDept || employeeOn(e, bulkDate).department === bulkDept)
     );
     let count = 0;
     let skipped = 0;
 
     targets.forEach((emp) => {
-      const shift = shiftOf(emp);
+      const shift = shiftOn(emp, bulkDate);
       if (bulkCheckOut && (bulkCheckOut === bulkCheckIn || (!isOvernight(shift) && bulkCheckOut < bulkCheckIn))) {
         skipped++;
         return;
       }
       const existing = attendance.find((r) => r.employeeId === emp.id && r.date === bulkDate);
-      // Never overwrite attendance someone already recorded, and skip off days / leave.
-      const dayType = resolveUnmarkedDay(emp, shift, bulkDate, holidays, leaves, today);
+      // Never overwrite attendance someone already recorded, and skip off days, leave and duty periods.
+      const dayType = resolveUnmarkedDay(emp, shift, bulkDate, holidays, leaves, today, dutyPeriods);
       if ((existing && !existing.autoMarked) || (dayType !== 'Absent' && dayType !== 'Pending')) {
         skipped++;
         return;
@@ -317,14 +361,14 @@ export const AttendancePage: React.FC = () => {
     if (count === 0) {
       warning(
         'Nothing to mark',
-        'Everyone selected is already marked, off, on leave, or the times are invalid for their shift.'
+        'Everyone selected is already marked, off, on leave or duty, or the times are invalid for their shift.'
       );
       return;
     }
     success(
       'Bulk Attendance Applied',
       `Marked ${count} employee${count === 1 ? '' : 's'} for ${bulkDate}` +
-        (skipped ? `; skipped ${skipped} already marked, off or on leave.` : '.')
+        (skipped ? `; skipped ${skipped} already marked, off, on leave or on duty.` : '.')
     );
     reloadData();
     setIsBulkModalOpen(false);
@@ -400,17 +444,20 @@ export const AttendancePage: React.FC = () => {
   // Export CSV
   const handleExportCSV = () => {
     const selectedMonth = selectedDate.slice(0, 7);
-    const headers = ['Employee ID', 'Name', 'Department', 'Date', 'Check-In', 'Check-Out', 'Status', 'Worked (Hrs)', 'OT (Hrs)'];
-    const visibleIds = new Set(filteredEmployees.map((e) => e.id));
+    const headers = ['Employee ID', 'Name', 'Department', 'Site', 'Date', 'Check-In', 'Check-Out', 'Status', 'Worked (Hrs)', 'OT (Hrs)'];
+    const visibleIds = new Set(dailyRows.map((r) => r.emp.id));
     const rows = attendance
       .filter((r) => r.date.startsWith(selectedMonth) && visibleIds.has(r.employeeId))
       .sort((a, b) => a.date.localeCompare(b.date) || a.employeeId.localeCompare(b.employeeId))
       .map((r) => {
         const emp = employees.find((e) => e.id === r.employeeId);
+        // Department and site as they were on the record's date
+        const asOf = emp ? employeeOn(emp, r.date) : undefined;
         return [
           r.employeeId,
           emp?.name || '',
-          emp?.department || '',
+          asOf?.department || '',
+          siteNameOf(sites, asOf?.siteId),
           r.date,
           r.checkIn || '',
           r.checkOut || '',
@@ -574,6 +621,43 @@ export const AttendancePage: React.FC = () => {
               </select>
             </div>
           )}
+
+          {canView && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-neutral-500">Site:</span>
+              <select
+                value={siteFilter}
+                onChange={(e) => setSiteFilter(e.target.value)}
+                className="px-2.5 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-700 dark:text-neutral-300"
+              >
+                <option value="">All Sites</option>
+                {sites.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+                <option value="none">No site</option>
+              </select>
+            </div>
+          )}
+
+          {viewMode === 'daily' && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-neutral-500">Status:</span>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as DayStatus | '')}
+                className="px-2.5 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-700 dark:text-neutral-300"
+              >
+                <option value="">All Statuses</option>
+                {STATUS_FILTERS.map((s) => (
+                  <option key={s} value={s}>
+                    {s} ({dailyRows.filter((r) => r.status === s).length})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
       </div>
@@ -591,6 +675,7 @@ export const AttendancePage: React.FC = () => {
                 <tr>
                   <th className="py-3 px-4">Employee</th>
                   <th className="py-3 px-4">Department</th>
+                  <th className="py-3 px-4">Site</th>
                   <th className="py-3 px-4">Assigned Shift</th>
                   <th className="py-3 px-4">Check-In</th>
                   <th className="py-3 px-4">Check-Out</th>
@@ -603,15 +688,13 @@ export const AttendancePage: React.FC = () => {
               <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
                 {filteredEmployees.length === 0 && (
                   <tr>
-                    <td colSpan={canMark ? 9 : 8} className="py-12 text-center text-neutral-400">
+                    <td colSpan={canMark ? 10 : 9} className="py-12 text-center text-neutral-400">
                       No employees to show.
                     </td>
                   </tr>
                 )}
-                {filteredEmployees.map((emp) => {
-                  const rec = dailyRecordsMap.get(emp.id);
-                  const shift = shifts.find((s) => s.id === emp.shiftId);
-                  const dayStatus = rec ? rec.status : UNMARKED_LABEL[unmarkedStatus(emp, selectedDate)];
+                {filteredRows.map(({ emp, asOf, rec, status: dayStatus }) => {
+                  const shift = shifts.find((s) => s.id === asOf.shiftId);
 
                   return (
                     <tr
@@ -632,7 +715,10 @@ export const AttendancePage: React.FC = () => {
                         </div>
                       </td>
                       <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300">
-                        {emp.department}
+                        {asOf.department}
+                      </td>
+                      <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300 whitespace-nowrap">
+                        {siteNameOf(sites, asOf.siteId) || <span className="text-neutral-400">—</span>}
                       </td>
                       <td className="py-3.5 px-4 text-neutral-500 font-mono">
                         {shift ? `${shift.startTime} – ${shift.endTime}` : '09:00 – 18:00'}
@@ -655,6 +741,9 @@ export const AttendancePage: React.FC = () => {
                         <Badge status={dayStatus} />
                         {rec?.autoMarked && rec.status === 'Absent' && (
                           <span className="block text-[10px] text-neutral-400 mt-0.5">No attendance recorded</span>
+                        )}
+                        {!rec && dayStatus === 'Absent' && (
+                          <span className="block text-[10px] text-neutral-400 mt-0.5">Not marked · past grace time</span>
                         )}
                       </td>
                       {canMark && (
@@ -688,6 +777,8 @@ export const AttendancePage: React.FC = () => {
           attendance={attendance}
           holidays={holidays}
           leaves={leaves}
+          dutyPeriods={dutyPeriods}
+          history={history}
           canMark={canMark}
           showFilters={!isEmployee}
           onEditDay={openEditor}
@@ -873,6 +964,9 @@ export const AttendancePage: React.FC = () => {
                 <option value="Half Day">Half Day</option>
                 <option value="Absent">Absent</option>
                 <option value="On Leave">On Leave</option>
+                <option value="On Duty">On Duty (field duty)</option>
+                <option value="WFH">WFH</option>
+                <option value="Suspended">Suspended</option>
                 <option value="Holiday">Holiday</option>
                 <option value="Weekend">Weekend</option>
               </select>

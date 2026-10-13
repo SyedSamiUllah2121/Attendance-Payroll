@@ -19,7 +19,9 @@ import { useSettings } from '../context/SettingsContext';
 import { useNotification } from '../context/NotificationContext';
 import { Badge } from '../components/common/Badge';
 import { calculateSalary, getLopDays, getProvidentFundRate, round } from '../utils/payrollEngine';
-import { getWorkingDaysInMonth } from '../utils/attendanceEngine';
+import { summarizePayMonth } from '../utils/payDays';
+import { makeEmployeeOnDate } from '../utils/employeeTimeline';
+import { siteNameOf } from '../utils/sites';
 import { currentMonthStr, monthEndStr, todayStr, toDateStr } from '../utils/dateUtils';
 
 interface PayrollPageProps {
@@ -101,69 +103,45 @@ export const PayrollPage: React.FC<PayrollPageProps> = ({ onOpenPayslip }) => {
     }
 
     // Always read fresh data: other pages may have changed it since this page opened
-    const attendance = storageService.getAttendance().filter((r) => r.date.startsWith(selectedMonth));
-    const leaves = storageService.getLeaves();
-    const shifts = storageService.getShifts();
-    const holidays = storageService.getHolidays();
-    const loans = storageService.getLoans();
     const monthStart = `${selectedMonth}-01`;
     const monthEnd = monthEndStr(selectedMonth);
-    const [year, month] = selectedMonth.split('-').map(Number);
-    const holidayDates = new Set(holidays.map((h) => h.date));
+    const attendance = storageService
+      .getAttendance()
+      .filter((r) => r.date >= monthStart && r.date <= monthEnd);
+    const shifts = storageService.getShifts();
+    const loans = storageService.getLoans();
+    const sites = storageService.getSites();
+    const employeeOn = makeEmployeeOnDate(storageService.getEmployeeHistory());
+    const payCtx = {
+      attendance,
+      shifts,
+      holidays: storageService.getHolidays(),
+      leaves: storageService.getLeaves(),
+      dutyPeriods: storageService.getDutyPeriods(),
+      history: storageService.getEmployeeHistory(),
+    };
 
-    // Employees on staff during this month (not those who join after it)
+    // Employees on staff during this month: not those who join after it or left before it
     const activeEmployees = storageService
       .getEmployees()
-      .filter((e) => e.status === 'Active' && (!e.joiningDate || e.joiningDate <= monthEnd));
+      .filter(
+        (e) =>
+          (e.status === 'Active' || (e.lastWorkingDay && e.lastWorkingDay >= monthStart)) &&
+          (!e.joiningDate || e.joiningDate <= monthEnd) &&
+          (!e.lastWorkingDay || e.lastWorkingDay >= monthStart)
+      );
 
     const items: PayrollItem[] = activeEmployees.map((emp) => {
       const shift = shifts.find((s) => s.id === emp.shiftId) || shifts[0];
-      const workingDaysInMonth = shift ? getWorkingDaysInMonth(year, month, shift, holidays) : 22;
-      const empAttendance = attendance.filter((r) => r.employeeId === emp.id);
+      // Every day resolved with the central day resolver and priced with PAY_FACTOR
+      const days = summarizePayMonth(emp, selectedMonth, payCtx);
+      const workingDaysInMonth = days.workingDays || 22;
+      const { presentDays, lateDays, absentDays, halfDays, notJoinedDays, afterExitDays } = days;
+      // Loss of pay other than absences and half days (unpaid leave, suspension, days not on staff),
+      // so getLopDays(absent, unpaid, half) on the payslip adds up to the same total.
+      const otherLopDays = round(Math.max(0, days.lopDays - absentDays - halfDays * 0.5));
 
-      let presentDays = 0;
-      let lateDays = 0;
-      let absentDays = 0;
-      let halfDays = 0;
-      let unpaidLeaveDays = 0;
-      let overtimeMinutes = 0;
-
-      empAttendance.forEach((r) => {
-        if (r.status === 'Present') presentDays++;
-        else if (r.status === 'Late') {
-          presentDays++;
-          lateDays++;
-        } else if (r.status === 'Absent') absentDays++;
-        else if (r.status === 'Half Day') halfDays++;
-        else if (r.status === 'On Leave') {
-          // Paid leave costs nothing; approved Unpaid leave is loss of pay
-          const leave = leaves.find(
-            (l) =>
-              l.employeeId === emp.id &&
-              l.status === 'Approved' &&
-              l.fromDate <= r.date &&
-              l.toDate >= r.date
-          );
-          if (leave?.leaveType === 'Unpaid') unpaidLeaveDays += leave.isHalfDay ? 0.5 : 1;
-        }
-
-        overtimeMinutes += r.overtimeMinutes || 0;
-      });
-
-      // Joined mid-month: working days before the joining date are not paid
-      let notJoinedDays = 0;
-      if (emp.joiningDate && emp.joiningDate > monthStart) {
-        const lastDay = Number(monthEnd.slice(8));
-        for (let day = 1; day <= lastDay; day++) {
-          const d = new Date(year, month - 1, day);
-          const dateStr = toDateStr(d);
-          if (dateStr >= emp.joiningDate) break;
-          const works = shift ? shift.workingDays.includes(d.getDay()) : d.getDay() % 6 !== 0;
-          if (works && !holidayDates.has(dateStr)) notJoinedDays++;
-        }
-      }
-
-      const overtimeHours = Math.round((overtimeMinutes / 60) * 10) / 10;
+      const overtimeHours = Math.round((days.overtimeMinutes / 60) * 10) / 10;
 
       // Loan installments due this month, never more than what is still owed
       const dueInstallment = loansDueFor(loans, emp.id, selectedMonth).reduce(
@@ -172,14 +150,14 @@ export const PayrollPage: React.FC<PayrollPageProps> = ({ onOpenPayslip }) => {
       );
 
       const calc = calculateSalary({
-        basicSalary: emp.basicSalary,
+        basicSalary: days.basicSalary,
         workingDaysInMonth,
         shiftHoursPerDay: shiftHoursPerDay(shift),
         presentDays,
         lateCount: lateDays,
         halfDays,
         absentDays,
-        unpaidLeaveDays: unpaidLeaveDays + notJoinedDays,
+        unpaidLeaveDays: otherLopDays,
         overtimeHours,
         bonus: 0,
         loanInstallment: dueInstallment,
@@ -189,6 +167,15 @@ export const PayrollPage: React.FC<PayrollPageProps> = ({ onOpenPayslip }) => {
       const notes: string[] = [];
       if (notJoinedDays > 0) {
         notes.push(`Joined ${emp.joiningDate}: ${notJoinedDays} working day(s) before joining not paid`);
+      }
+      if (afterExitDays > 0) {
+        notes.push(`Last working day ${emp.lastWorkingDay}: ${afterExitDays} working day(s) after it not paid`);
+      }
+      if (days.suspendedDays > 0) {
+        notes.push(`Suspended ${days.suspendedDays} working day(s): unpaid`);
+      }
+      if (days.salaryChanged) {
+        notes.push(`Salary revised this month: basic averaged at the rate in effect each day`);
       }
       if (calc.loanInstallment < round(dueInstallment)) {
         notes.push(
@@ -201,18 +188,27 @@ export const PayrollPage: React.FC<PayrollPageProps> = ({ onOpenPayslip }) => {
         employeeId: emp.id,
         employeeName: emp.name,
         department: emp.department,
+        // Site on the last day paid this month (a mid-month transfer shows the new site)
+        site:
+          siteNameOf(
+            sites,
+            employeeOn(emp, emp.lastWorkingDay && emp.lastWorkingDay < monthEnd ? emp.lastWorkingDay : monthEnd).siteId
+          ) || undefined,
         designation: emp.designation,
-        basicSalary: emp.basicSalary,
+        basicSalary: days.basicSalary,
         workingDays: workingDaysInMonth,
         presentDays,
         absentDays,
         lateCount: lateDays,
         lateDays,
         halfDays,
+        dutyDays: days.dutyDays,
+        wfhDays: days.wfhDays,
+        suspendedDays: days.suspendedDays,
         overtimeHours,
         employerPF: calc.providentFund,
         ...calc,
-        unpaidLeaveDays: unpaidLeaveDays + notJoinedDays,
+        unpaidLeaveDays: otherLopDays,
         loanDeduction: calc.loanInstallment,
         bonus: 0,
         adjustmentNote: notes.length ? notes.join(' · ') : undefined,
@@ -306,6 +302,7 @@ export const PayrollPage: React.FC<PayrollPageProps> = ({ onOpenPayslip }) => {
     const headers = [
       'Beneficiary Name',
       'Employee ID',
+      'Site',
       'Bank Name',
       'Account / IBAN Number',
       'Net Amount',
@@ -320,6 +317,7 @@ export const PayrollPage: React.FC<PayrollPageProps> = ({ onOpenPayslip }) => {
       return [
         csvCell(item.employeeName),
         csvCell(item.employeeId),
+        csvCell(item.site || ''),
         csvCell(emp?.bankName || ''),
         csvCell(emp?.accountNumber || ''),
         item.netSalary.toFixed(2),
@@ -576,6 +574,7 @@ export const PayrollPage: React.FC<PayrollPageProps> = ({ onOpenPayslip }) => {
                         </td>
                         <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300">
                           {item.department}
+                          {item.site && <span className="block text-[11px] text-neutral-400">{item.site}</span>}
                         </td>
                         <td className="py-3.5 px-4 font-mono">
                           <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{item.presentDays}P</span>{' '}
@@ -588,6 +587,18 @@ export const PayrollPage: React.FC<PayrollPageProps> = ({ onOpenPayslip }) => {
                           {(item.lateDays ?? item.lateCount ?? 0) > 0 && (
                             <span className="text-amber-600 dark:text-amber-400 text-[11px] ml-1">
                               ({item.lateDays ?? item.lateCount}L)
+                            </span>
+                          )}
+                          {((item.dutyDays || 0) > 0 || (item.wfhDays || 0) > 0) && (
+                            <span className="block text-teal-600 dark:text-teal-400 text-[11px]">
+                              {[item.dutyDays ? `${item.dutyDays} duty` : '', item.wfhDays ? `${item.wfhDays} WFH` : '']
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </span>
+                          )}
+                          {(item.suspendedDays || 0) > 0 && (
+                            <span className="block text-orange-600 dark:text-orange-400 text-[11px]">
+                              {item.suspendedDays} suspended (unpaid)
                             </span>
                           )}
                         </td>

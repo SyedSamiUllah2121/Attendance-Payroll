@@ -191,6 +191,7 @@ export const PayslipsPage: React.FC<PayslipsPageProps> = ({
               <p className="font-medium text-neutral-900 dark:text-neutral-100 mt-0.5">
                 {item.department}
               </p>
+              {item.site && <p className="text-[11px] text-neutral-500">Site: {item.site}</p>}
             </div>
             <div>
               <span className="text-neutral-400">Designation</span>

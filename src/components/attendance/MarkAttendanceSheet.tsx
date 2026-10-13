@@ -4,7 +4,14 @@ import { AttendanceRecord, AttendanceStatus, Employee, Holiday, Shift } from '..
 import { storageService } from '../../services/storageService';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
-import { evaluateAttendanceStatus } from '../../utils/attendanceEngine';
+import {
+  DUTY_STATUSES,
+  evaluateAttendanceStatus,
+  isEmployedOn,
+  resolveUnmarkedDay,
+} from '../../utils/attendanceEngine';
+import { makeEmployeeOnDate } from '../../utils/employeeTimeline';
+import { siteNameOf } from '../../utils/sites';
 import { TimeInput } from '../common/TimeInput';
 import { Modal } from '../common/Modal';
 import { todayStr } from '../../utils/dateUtils';
@@ -45,6 +52,9 @@ const STATUS_STYLE: Record<string, string> = {
   'On Leave': 'bg-sky-600 hover:bg-sky-700 text-white',
   Holiday: 'bg-violet-100 dark:bg-violet-950/60 text-violet-700 dark:text-violet-300 hover:bg-violet-200',
   Weekend: 'bg-neutral-100 dark:bg-neutral-800 text-neutral-500 hover:bg-neutral-200 dark:hover:bg-neutral-700',
+  'On Duty': 'bg-teal-100 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 hover:bg-teal-200',
+  WFH: 'bg-indigo-100 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200',
+  Suspended: 'bg-orange-100 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300 hover:bg-orange-200',
 };
 
 const STATUS_LABEL: Record<string, string> = { 'On Leave': 'Leave' };
@@ -84,6 +94,8 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
   const today = todayStr();
   const [date, setDate] = useState(today);
   const [dept, setDept] = useState('');
+  const [site, setSite] = useState('');
+  const sites = useMemo(() => storageService.getSites(), []);
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState<Record<string, RowState>>({});
 
@@ -95,11 +107,16 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
     applyToAll: boolean;
   } | null>(null);
   const leaves = useMemo(() => storageService.getLeaves(), []);
+  // Re-read after each save: marking someone present can end their duty period.
+  const dutyPeriods = useMemo(() => storageService.getDutyPeriods(), [attendance]);
 
-  const activeEmployees = employees.filter((e) => e.status === 'Active');
-  const shiftOf = (emp: Employee) => shifts.find((s) => s.id === emp.shiftId) || shifts[0];
+  // Staff on the payroll that day (exited staff drop off after their last working day)
+  const activeEmployees = employees.filter((e) => e.status === 'Active' && isEmployedOn(e, date));
+  const employeeOn = useMemo(() => makeEmployeeOnDate(storageService.getEmployeeHistory()), [employees]);
+  // The shift the employee was on that day (a transfer applies from its effective date)
+  const shiftOf = (emp: Employee) =>
+    shifts.find((s) => s.id === employeeOn(emp, date).shiftId) || shifts[0];
   const holiday = holidays.find((h) => h.date === date);
-  const dayOfWeek = new Date(date + 'T00:00:00').getDay();
 
   const existingFor = (empId: string) =>
     attendance.find((r) => r.employeeId === empId && r.date === date);
@@ -122,14 +139,11 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
         };
         return;
       }
-      const onLeave = leaves.some(
-        (l) =>
-          l.employeeId === emp.id && l.status === 'Approved' && l.fromDate <= date && l.toDate >= date
-      );
       const shift = shiftOf(emp);
-      if (onLeave || holiday || !shift.workingDays.includes(dayOfWeek)) {
-        const status: MarkStatus = onLeave ? 'On Leave' : holiday ? 'Holiday' : 'Weekend';
-        next[emp.id] = { status, checkIn: '', checkOut: '', notes: '', dirty: false, auto: true };
+      // Holiday, off day, approved leave or a Field Duty / WFH / Suspension period
+      const dayType = resolveUnmarkedDay(emp, shift, date, holidays, leaves, today, dutyPeriods);
+      if (dayType === 'Holiday' || dayType === 'Weekend' || dayType === 'On Leave' || DUTY_STATUSES.includes(dayType as AttendanceStatus)) {
+        next[emp.id] = { status: dayType as AttendanceStatus, checkIn: '', checkOut: '', notes: '', dirty: false, auto: true };
         return;
       }
       // Working day with no record yet: everyone is Present by default.
@@ -278,6 +292,7 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
 
   const visible = activeEmployees
     .filter((e) => !dept || e.department === dept)
+    .filter((e) => !site || (site === 'none' ? !e.siteId : e.siteId === site))
     .filter((e) => {
       const q = search.trim().toLowerCase();
       return !q || e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q);
@@ -288,7 +303,8 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
       const next = { ...prev };
       visible.forEach((emp) => {
         const r = next[emp.id];
-        if (!r || TIMED.includes(r.status)) return;
+        // Duty periods are left alone: marking those people present would end their period.
+        if (!r || TIMED.includes(r.status) || DUTY_STATUSES.includes(r.status as AttendanceStatus)) return;
         const shift = shiftOf(emp);
         next[emp.id] = {
           ...r,
@@ -355,6 +371,10 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
     });
 
     storageService.saveAttendance(list);
+    // Present / Late / Half Day ends a running Field Duty / WFH / Suspension period
+    saveIds
+      .filter((id) => TIMED.includes(rows[id].status))
+      .forEach((id) => storageService.endDutyPeriodForWork(id, date));
     success('Attendance Saved', `Saved ${saved} record${saved === 1 ? '' : 's'} for ${date}.`);
     onSaved();
   };
@@ -405,6 +425,15 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
                 {d}
               </option>
             ))}
+          </select>
+          <select value={site} onChange={(e) => setSite(e.target.value)} className={`${inputClass} py-1.5`}>
+            <option value="">All Sites</option>
+            {sites.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+            <option value="none">No site</option>
           </select>
           <div className="relative flex-1 min-w-[160px]">
             <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
@@ -497,7 +526,7 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
                         {r.dirty && <span className="ml-1.5 text-[10px] text-indigo-600 dark:text-indigo-400">● edited</span>}
                       </p>
                       <span className="text-[11px] text-neutral-400 font-mono">
-                        {emp.id} · {shift.startTime}–{shift.endTime}
+                        {emp.id}{siteNameOf(sites, emp.siteId) ? ` · ${siteNameOf(sites, emp.siteId)}` : ''} · {shift.startTime}–{shift.endTime}
                       </span>
                     </td>
                     <td className="py-2.5 px-4">

@@ -17,6 +17,7 @@ import {
   Building2,
   CalendarRange,
   KeyRound,
+  MapPin,
 } from 'lucide-react';
 import { ROLE_LABELS } from '../../utils/permissions';
 import { useAuth } from '../../context/AuthContext';
@@ -110,6 +111,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'holidays',
       label: 'Holidays',
       icon: CalendarDays,
+    },
+    {
+      id: 'sites',
+      label: 'Sites',
+      icon: MapPin,
     },
     {
       id: 'reports',

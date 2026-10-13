@@ -16,6 +16,7 @@ import { computeAnnualLeave, getAnnualLeavePolicy } from '../utils/annualLeaveEn
 import { useNotification } from '../context/NotificationContext';
 import { useAuth } from '../context/AuthContext';
 import { currentMonthStr } from '../utils/dateUtils';
+import { siteNameOf } from '../utils/sites';
 
 /**
  * One CSV field: quoted when it holds a comma, quote or line break (quotes doubled). Text
@@ -47,6 +48,7 @@ export const ReportsPage: React.FC = () => {
   const leaves = storageService.getLeaves();
   const payrolls = storageService.getPayrolls();
   const loans = storageService.getLoans();
+  const sites = storageService.getSites();
 
   // Active staff, plus anyone deactivated who still has attendance in the selected month
   const employees = allEmployees.filter(
@@ -183,7 +185,7 @@ export const ReportsPage: React.FC = () => {
             </div>
             <button
               onClick={() => {
-                const headers = ['Employee ID', 'Name', 'Department', 'Present', 'Late', 'Absent', 'Half Day', 'Leave', 'OT Hours'];
+                const headers = ['Employee ID', 'Name', 'Department', 'Site', 'Present', 'Late', 'Absent', 'Half Day', 'Leave', 'OT Hours'];
                 const rows = employees.map((emp) => {
                   const empRecs = attendance.filter((r) => r.employeeId === emp.id);
                   const p = empRecs.filter((r) => r.status === 'Present').length;
@@ -192,7 +194,7 @@ export const ReportsPage: React.FC = () => {
                   const hd = empRecs.filter((r) => r.status === 'Half Day').length;
                   const lv = empRecs.filter((r) => r.status === 'On Leave').length;
                   const ot = (empRecs.reduce((acc, r) => acc + (r.overtimeMinutes || 0), 0) / 60).toFixed(1);
-                  return [emp.id, emp.name, emp.department, p, l, a, hd, lv, ot];
+                  return [emp.id, emp.name, emp.department, siteNameOf(sites, emp.siteId), p, l, a, hd, lv, ot];
                 });
                 downloadCSV(`WorkPulse_Attendance_${selectedMonth}`, headers, rows);
               }}
@@ -241,6 +243,9 @@ export const ReportsPage: React.FC = () => {
                       </td>
                       <td className="py-3 px-4 font-sans text-neutral-600 dark:text-neutral-300">
                         {emp.department}
+                        {siteNameOf(sites, emp.siteId) && (
+                          <span className="block text-[11px] text-neutral-400">{siteNameOf(sites, emp.siteId)}</span>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-center font-bold text-emerald-600">{p}</td>
                       <td className="py-3 px-3 text-center font-bold text-amber-600">{l}</td>
@@ -277,11 +282,12 @@ export const ReportsPage: React.FC = () => {
             </div>
             <button
               onClick={() => {
-                const headers = ['Employee ID', 'Name', 'Department', 'Basic', 'Gross', 'Tax', 'PF', 'LOP / Late', 'Net'];
+                const headers = ['Employee ID', 'Name', 'Department', 'Site', 'Basic', 'Gross', 'Tax', 'PF', 'LOP / Late', 'Net'];
                 const rows = (currentPayroll?.items || []).map((i) => [
                   i.employeeId,
                   i.employeeName,
                   i.department,
+                  i.site || '',
                   Math.round(i.basicSalary),
                   Math.round(i.grossSalary),
                   Math.round(i.incomeTax),
@@ -354,13 +360,13 @@ export const ReportsPage: React.FC = () => {
               onClick={() => {
                 const sickQuota = settings.leaves?.sick ?? settings.leaveQuotas?.Sick ?? 10;
                 const casQuota = settings.leaves?.casual ?? settings.leaveQuotas?.Casual ?? 8;
-                const headers = ['Employee ID', 'Name', 'Department', 'Annual Used', 'Sick Used', 'Casual Used', 'Total Remaining'];
+                const headers = ['Employee ID', 'Name', 'Department', 'Site', 'Annual Used', 'Sick Used', 'Casual Used', 'Total Remaining'];
                 const rows = employees.map((emp) => {
                   const { quota: annQuota, used: ann } = annualFor(emp);
                   const sick = usedInYear(emp.id, 'Sick');
                   const cas = usedInYear(emp.id, 'Casual');
                   const totalRem = annQuota + sickQuota + casQuota - (ann + sick + cas);
-                  return [emp.id, emp.name, emp.department, ann, sick, cas, Math.max(0, Math.round(totalRem * 10) / 10)];
+                  return [emp.id, emp.name, emp.department, siteNameOf(sites, emp.siteId), ann, sick, cas, Math.max(0, Math.round(totalRem * 10) / 10)];
                 });
                 downloadCSV(`WorkPulse_Leave_Balances_${leaveYear}`, headers, rows);
               }}
@@ -407,6 +413,9 @@ export const ReportsPage: React.FC = () => {
                       </td>
                       <td className="py-3 px-4 font-sans text-neutral-600 dark:text-neutral-300">
                         {emp.department}
+                        {siteNameOf(sites, emp.siteId) && (
+                          <span className="block text-[11px] text-neutral-400">{siteNameOf(sites, emp.siteId)}</span>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-center">
                         <span className="text-indigo-600 font-bold">{ann}</span> used

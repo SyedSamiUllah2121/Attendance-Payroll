@@ -1,4 +1,23 @@
-import { AppSettings, TaxSlab } from '../types';
+import { AppSettings, AttendanceStatus, TaxSlab } from '../types';
+
+/**
+ * Share of a working day's pay each day status earns. Payroll resolves every working day
+ * (utils/payDays.ts) and deducts (1 - factor) days as loss of pay. Approved leave is split
+ * into paid leave and Unpaid leave.
+ */
+export const PAY_FACTOR: Record<Exclude<AttendanceStatus, 'On Leave'> | 'Paid Leave' | 'Unpaid Leave', number> = {
+  Present: 1,
+  Late: 1,
+  'On Duty': 1,
+  WFH: 1,
+  Holiday: 1,
+  Weekend: 1,
+  'Paid Leave': 1,
+  'Half Day': 0.5,
+  Absent: 0,
+  Suspended: 0,
+  'Unpaid Leave': 0,
+};
 
 /**
  * Calculates annual income tax given an annual taxable income and tax slabs.

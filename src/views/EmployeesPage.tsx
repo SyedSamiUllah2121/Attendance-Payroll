@@ -19,7 +19,15 @@ import {
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
-import { Employee, EmploymentType, Gender, EmployeeStatus, Shift } from '../types';
+import {
+  DutyPeriod,
+  Employee,
+  EmployeeHistoryEntry,
+  EmploymentType,
+  Gender,
+  EmployeeStatus,
+  Shift,
+} from '../types';
 import { storageService } from '../services/storageService';
 import { useSettings } from '../context/SettingsContext';
 import { useNotification } from '../context/NotificationContext';
@@ -28,12 +36,18 @@ import { Badge } from '../components/common/Badge';
 import { Modal } from '../components/common/Modal';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { LeaveRecordView } from '../components/leave/LeaveRecordView';
+import { EmployeeActionKind, EmployeeActionsMenu } from '../components/employees/EmployeeActionsMenu';
+import { EmployeeActionModal } from '../components/employees/EmployeeActionModal';
+import { EmployeeHistoryView } from '../components/employees/EmployeeHistoryView';
+import { recordProfileEdit, setEmployeeStatus } from '../services/employeeActionsService';
 import {
   computeLeaveRecord,
   formatService,
   getAnnualLeavePolicy,
 } from '../utils/annualLeaveEngine';
+import { DUTY_STATUS, dutyPeriodOn } from '../utils/attendanceEngine';
 import { todayStr } from '../utils/dateUtils';
+import { siteNameOf } from '../utils/sites';
 
 /** Next free EMP-### id. Checks every stored employee so ids are never reused. */
 const nextEmployeeId = (list: Employee[]): string => {
@@ -50,12 +64,18 @@ interface EmployeesPageProps {
 
 export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) => {
   const { formatMoney, settings } = useSettings();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const canEdit = can('employees.edit');
   const { success, error, info } = useNotification();
 
   const [employees, setEmployees] = useState<Employee[]>(() => storageService.getEmployees());
   const [shifts] = useState<Shift[]>(() => storageService.getShifts());
+  const [dutyPeriods, setDutyPeriods] = useState<DutyPeriod[]>(() => storageService.getDutyPeriods());
+  const [history, setHistory] = useState<EmployeeHistoryEntry[]>(() => storageService.getEmployeeHistory());
+  const [action, setAction] = useState<{ kind: EmployeeActionKind; employee: Employee } | null>(null);
+  const [sites] = useState(() => storageService.getSites());
+  const [selectedSite, setSelectedSite] = useState('');
+  const today = todayStr();
 
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState('');
@@ -71,7 +91,9 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [viewingEmployee, setViewingEmployee] = useState<Employee | null>(null);
-  const [profileTab, setProfileTab] = useState<'overview' | 'attendance' | 'leaves' | 'annual' | 'payslips' | 'documents'>('overview');
+  const [profileTab, setProfileTab] = useState<
+    'overview' | 'history' | 'attendance' | 'leaves' | 'annual' | 'payslips' | 'documents'
+  >('overview');
   const [deactivatingEmployee, setDeactivatingEmployee] = useState<Employee | null>(null);
 
   // Departments list (plus any other department already used by an employee)
@@ -106,6 +128,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
     employmentType: 'Permanent' as EmploymentType,
     joiningDate: todayStr(),
     shiftId: 'shift-morning',
+    siteId: '',
     bankName: 'Meezan Bank',
     accountNumber: '',
     status: 'Active' as EmployeeStatus,
@@ -113,7 +136,18 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
   });
 
   const loadEmployees = () => {
-    setEmployees(storageService.getEmployees());
+    const list = storageService.getEmployees();
+    setEmployees(list);
+    setDutyPeriods(storageService.getDutyPeriods());
+    setHistory(storageService.getEmployeeHistory());
+    // Keep an open profile showing the saved record
+    setViewingEmployee((cur) => (cur ? list.find((e) => e.id === cur.id) || cur : cur));
+  };
+
+  /** Field Duty / WFH / Suspension running today, shown next to the status. */
+  const currentDuty = (emp: Employee) => {
+    const period = dutyPeriodOn(emp.id, today, dutyPeriods);
+    return period ? DUTY_STATUS[period.type] : undefined;
   };
 
   const viewingRecord = viewingEmployee
@@ -155,6 +189,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
       employmentType: 'Permanent',
       joiningDate: todayStr(),
       shiftId: shifts[0]?.id || 'shift-morning',
+      siteId: '',
       bankName: 'Standard Chartered Bank',
       accountNumber: 'PK00SCBL0000000000000000',
       status: 'Active',
@@ -178,6 +213,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
       employmentType: emp.employmentType,
       joiningDate: emp.joiningDate,
       shiftId: emp.shiftId,
+      siteId: emp.siteId || '',
       bankName: emp.bankName,
       accountNumber: emp.accountNumber,
       status: emp.status,
@@ -194,6 +230,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
       name: formData.name.trim(),
       email: formData.email.trim(),
       designation: formData.designation.trim(),
+      siteId: formData.siteId || undefined,
     };
     if (!data.name || !data.email || !data.designation) {
       error('Validation Error', 'Full name, email, and designation are required.');
@@ -231,7 +268,11 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
         ...editingEmployee,
         ...data,
       };
-      storageService.updateEmployee(updated);
+      // Department, shift, designation, salary and status edits are logged in History too
+      storageService.transaction(() => {
+        recordProfileEdit(editingEmployee, updated, user?.name || 'Manager');
+        storageService.updateEmployee(updated);
+      });
       success('Employee Updated', `Updated profile of ${updated.name}`);
     } else {
       const created: Employee = {
@@ -250,11 +291,13 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
     if (!deactivatingEmployee) return;
     const newStatus: EmployeeStatus =
       deactivatingEmployee.status === 'Active' ? 'Inactive' : 'Active';
-    const updated: Employee = {
-      ...deactivatingEmployee,
-      status: newStatus,
-    };
-    storageService.updateEmployee(updated);
+    // Never deleted: deactivating keeps attendance and payroll. Logged as a Status Change.
+    setEmployeeStatus(
+      deactivatingEmployee,
+      newStatus,
+      newStatus === 'Inactive' ? 'Deactivated from the directory' : 'Reactivated from the directory',
+      user?.name || 'Manager'
+    );
     success(
       newStatus === 'Inactive' ? 'Employee Deactivated' : 'Employee Activated',
       `${deactivatingEmployee.name} is now ${newStatus}.`
@@ -277,8 +320,10 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
       const matchesDept = !selectedDept || emp.department === selectedDept;
       const matchesStatus = !selectedStatus || emp.status === selectedStatus;
       const matchesType = !selectedType || emp.employmentType === selectedType;
+      const matchesSite =
+        !selectedSite || (selectedSite === 'none' ? !emp.siteId : emp.siteId === selectedSite);
 
-      return matchesSearch && matchesDept && matchesStatus && matchesType;
+      return matchesSearch && matchesDept && matchesStatus && matchesType && matchesSite;
     })
     .sort((a, b) => {
       let comparison = 0;
@@ -379,14 +424,33 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             <option value="Intern">Intern</option>
           </select>
 
+          {/* Site */}
+          <select
+            value={selectedSite}
+            onChange={(e) => {
+              setSelectedSite(e.target.value);
+              setCurrentPage(1);
+            }}
+            className="px-2.5 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-700 dark:text-neutral-300 focus:outline-hidden"
+          >
+            <option value="">All Sites</option>
+            {sites.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+            <option value="none">No site</option>
+          </select>
+
           {/* Clear button */}
-          {(searchQuery || selectedDept || selectedStatus || selectedType) && (
+          {(searchQuery || selectedDept || selectedStatus || selectedType || selectedSite) && (
             <button
               onClick={() => {
                 setSearchQuery('');
                 setSelectedDept('');
                 setSelectedStatus('');
                 setSelectedType('');
+                setSelectedSite('');
                 setCurrentPage(1);
               }}
               className="text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 px-2 py-1"
@@ -426,6 +490,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                   </div>
                 </th>
                 <th className="py-3 px-4">Department & Role</th>
+                <th className="py-3 px-4">Site</th>
                 <th className="py-3 px-4">Shift</th>
                 <th className="py-3 px-4">Type</th>
                 <th
@@ -446,7 +511,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
               {paginatedEmployees.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-neutral-400">
+                  <td colSpan={9} className="py-12 text-center text-neutral-400">
                     No employees found matching the filters.
                   </td>
                 </tr>
@@ -490,6 +555,9 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                         </p>
                         <span className="text-[11px] text-neutral-500">{emp.department}</span>
                       </td>
+                      <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300 whitespace-nowrap">
+                        {siteNameOf(sites, emp.siteId) || <span className="text-neutral-400">—</span>}
+                      </td>
                       <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300">
                         {shift?.name || 'Standard'}
                       </td>
@@ -502,10 +570,25 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                         {formatMoney(emp.basicSalary)}
                       </td>
                       <td className="py-3.5 px-4">
-                        <Badge status={emp.status} />
+                        <div className="flex flex-wrap items-center gap-1">
+                          <Badge status={emp.status} />
+                          {emp.status === 'Active' && currentDuty(emp) && <Badge status={currentDuty(emp)!} />}
+                        </div>
+                        {emp.lastWorkingDay && (
+                          <span className="block text-[10px] text-neutral-400 mt-0.5">
+                            {emp.exitType || 'Exit'} · last day {emp.lastWorkingDay}
+                          </span>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1">
+                          {canEdit && (
+                            <EmployeeActionsMenu
+                              compact
+                              employee={emp}
+                              onSelect={(kind, employee) => setAction({ kind, employee })}
+                            />
+                          )}
                           <button
                             onClick={() => {
                               setViewingEmployee(emp);
@@ -732,7 +815,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
                 Joining Date
@@ -743,6 +826,26 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                 onChange={(e) => setFormData({ ...formData, joiningDate: e.target.value })}
                 className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
+                Site
+              </label>
+              <select
+                value={formData.siteId}
+                onChange={(e) => setFormData({ ...formData, siteId: e.target.value })}
+                className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-neutral-100"
+              >
+                <option value="">No site</option>
+                {sites
+                  .filter((s) => s.status === 'Active' || s.id === formData.siteId)
+                  .map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+              </select>
             </div>
 
             <div>
@@ -897,6 +1000,16 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
               Overview & Salary
             </button>
             <button
+              onClick={() => setProfileTab('history')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+                profileTab === 'history'
+                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300'
+                  : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+              }`}
+            >
+              History
+            </button>
+            <button
               onClick={() => setProfileTab('attendance')}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
                 profileTab === 'attendance'
@@ -946,6 +1059,14 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             >
               Documents
             </button>
+            {canEdit && (
+              <div className="ml-auto">
+                <EmployeeActionsMenu
+                  employee={viewingEmployee}
+                  onSelect={(kind, employee) => setAction({ kind, employee })}
+                />
+              </div>
+            )}
           </div>
 
           {/* Tab 1: Overview */}
@@ -960,9 +1081,17 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                 </div>
                 <div>
                   <span className="text-neutral-400">Status</span>
-                  <div className="mt-0.5">
+                  <div className="mt-0.5 flex flex-wrap gap-1">
                     <Badge status={viewingEmployee.status} />
+                    {viewingEmployee.status === 'Active' && currentDuty(viewingEmployee) && (
+                      <Badge status={currentDuty(viewingEmployee)!} />
+                    )}
                   </div>
+                  {viewingEmployee.lastWorkingDay && (
+                    <p className="text-[11px] text-neutral-400 mt-0.5">
+                      {viewingEmployee.exitType || 'Exit'} · last day {viewingEmployee.lastWorkingDay}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <span className="text-neutral-400">Joining Date</span>
@@ -977,6 +1106,9 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                   <span className="text-neutral-400">Employment</span>
                   <p className="font-semibold text-neutral-900 dark:text-neutral-100 mt-0.5">
                     {viewingEmployee.employmentType}
+                  </p>
+                  <p className="text-[11px] text-neutral-400">
+                    Site: {siteNameOf(sites, viewingEmployee.siteId) || 'not assigned'}
                   </p>
                 </div>
               </div>
@@ -1030,6 +1162,18 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                 </div>
               </div>
             </div>
+          )}
+
+          {/* History: changes and duty periods */}
+          {profileTab === 'history' && (
+            <EmployeeHistoryView
+              employee={viewingEmployee}
+              history={history.filter((h) => h.employeeId === viewingEmployee.id)}
+              periods={dutyPeriods.filter((p) => p.employeeId === viewingEmployee.id)}
+              shifts={shifts}
+              canEdit={canEdit}
+              onChanged={loadEmployees}
+            />
           )}
 
           {/* Tab 2: Attendance */}
@@ -1203,6 +1347,18 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
             </div>
           )}
         </Modal>
+      )}
+
+      {/* Employee Actions dialog */}
+      {action && (
+        <EmployeeActionModal
+          kind={action.kind}
+          employee={action.employee}
+          shifts={shifts}
+          departments={departments}
+          onClose={() => setAction(null)}
+          onSaved={loadEmployees}
+        />
       )}
 
       {/* Deactivate confirmation dialog */}

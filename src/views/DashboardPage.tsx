@@ -36,7 +36,9 @@ import { useNotification } from '../context/NotificationContext';
 import { storageService } from '../services/storageService';
 import {
   AttendanceRecord,
+  DutyPeriod,
   Employee,
+  EmployeeHistoryEntry,
   Holiday,
   LeaveRequest,
   PayrollRun,
@@ -48,11 +50,31 @@ import { Modal } from '../components/common/Modal';
 import { AnimatedNumber } from '../components/common/AnimatedNumber';
 import { formatTime12 } from '../components/common/TimeInput';
 import { DATA_CHANGED_EVENT } from '../components/layout/AppLayout';
-import { evaluateAttendanceStatus, hasApprovedLeaveOn, resolveUnmarkedDay } from '../utils/attendanceEngine';
+import {
+  DayStatus,
+  evaluateAttendanceStatus,
+  hasApprovedLeaveOn,
+  resolveDayStatus,
+  resolveUnmarkedDay,
+} from '../utils/attendanceEngine';
+import { makeEmployeeOnDate } from '../utils/employeeTimeline';
 import { computeAnnualLeave, getAnnualLeavePolicy } from '../utils/annualLeaveEngine';
 import { addDaysStr, monthEndStr, toDateStr } from '../utils/dateUtils';
 
-type DayCategory = 'present' | 'late' | 'leave' | 'absent' | 'notMarked' | 'off';
+type DayCategory = 'present' | 'late' | 'leave' | 'duty' | 'absent' | 'notMarked' | 'off';
+
+/** Dashboard bucket for a resolved day status. */
+const CATEGORY_OF: Partial<Record<DayStatus, DayCategory>> = {
+  Present: 'present',
+  'Half Day': 'present',
+  Late: 'late',
+  'On Leave': 'leave',
+  'On Duty': 'duty',
+  WFH: 'duty',
+  Suspended: 'duty',
+  Absent: 'absent',
+  'Not Marked': 'notMarked',
+};
 
 const formatLongDate = (dateStr: string) =>
   new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', {
@@ -78,6 +100,7 @@ const DRILL_META: Record<Exclude<DayCategory, 'off'>, { title: string; empty: st
   present: { title: 'Present', empty: 'Nobody is marked present.' },
   late: { title: 'Late Arrivals', empty: 'No late arrivals.' },
   leave: { title: 'On Leave', empty: 'Nobody is on leave.' },
+  duty: { title: 'Duty / WFH / Suspended', empty: 'Nobody is on field duty, WFH or suspended.' },
   absent: { title: 'Absent', empty: 'Nobody is absent.' },
   notMarked: { title: 'Not Marked Yet', empty: 'Everyone has been marked.' },
 };
@@ -107,6 +130,8 @@ export const DashboardPage: React.FC<DashboardProps> = ({
   const [regularizations, setRegularizations] = useState<RegularizationRequest[]>([]);
   const [payrolls, setPayrolls] = useState<PayrollRun[]>([]);
   const [holidays, setHolidays] = useState<Holiday[]>([]);
+  const [dutyPeriods, setDutyPeriods] = useState<DutyPeriod[]>([]);
+  const [history, setHistory] = useState<EmployeeHistoryEntry[]>([]);
   const [shifts] = useState(() => storageService.getShifts());
 
   // Live timer for check-in
@@ -129,6 +154,8 @@ export const DashboardPage: React.FC<DashboardProps> = ({
     setRegularizations(storageService.getRegularizations());
     setPayrolls(storageService.getPayrolls());
     setHolidays(storageService.getHolidays());
+    setDutyPeriods(storageService.getDutyPeriods());
+    setHistory(storageService.getEmployeeHistory());
   };
 
   useEffect(() => {
@@ -273,11 +300,13 @@ export const DashboardPage: React.FC<DashboardProps> = ({
   const activeEmployees = employees.filter((e) => e.status === 'Active');
   const viewHoliday = holidays.find((h) => h.date === viewDate);
 
-  // Classify every active employee for the chosen day from their record, approved leave,
-  // holidays and shift days. Past days with no record count as absent; today is "not marked yet".
-  // Staff who hadn't joined yet on that day are left out entirely.
-  const dayRows = activeEmployees
-    .filter((emp) => !emp.joiningDate || emp.joiningDate <= viewDate)
+  // Classify every employee on staff that day with the central day resolver: their record,
+  // approved leave, Field Duty / WFH / Suspension, holidays and shift days. Past days with no
+  // record are absent; today is "not marked yet" until the shift's grace time, then absent.
+  // Staff who hadn't joined yet, or had already left, are left out entirely.
+  const employeeOn = makeEmployeeOnDate(history);
+  const dayRows = employees
+    .filter((emp) => emp.status === 'Active' || todayAttendance.some((r) => r.employeeId === emp.id))
     .map((emp) => {
       const rec = todayAttendance.find((r) => r.employeeId === emp.id);
       const leave = leaves.find(
@@ -287,27 +316,23 @@ export const DashboardPage: React.FC<DashboardProps> = ({
           l.fromDate <= viewDate &&
           l.toDate >= viewDate
       );
-      const shift = shifts.find((s) => s.id === emp.shiftId) || shifts[0];
-      // What the day means without a record: Holiday / Weekend / On Leave / Absent / Pending
-      const unmarked = resolveUnmarkedDay(emp, shift, viewDate, holidays, leaves, todayStr);
-      let category: DayCategory;
-      if (rec) {
-        if (rec.status === 'Present' || rec.status === 'Half Day') category = 'present';
-        else if (rec.status === 'Late') category = 'late';
-        else if (rec.status === 'On Leave') category = 'leave';
-        else if (rec.status === 'Absent') category = 'absent';
-        else category = 'off';
-      } else if (unmarked === 'On Leave') category = 'leave';
-      else if (unmarked === 'Absent') category = 'absent';
-      else if (unmarked === 'Pending') category = 'notMarked';
-      else category = 'off';
-      return { emp, rec, leave, category, shift, unmarked };
-    });
+      const shift = shifts.find((s) => s.id === employeeOn(emp, viewDate).shiftId) || shifts[0];
+      const status = resolveDayStatus(emp, shift, viewDate, rec, {
+        holidays,
+        leaves,
+        dutyPeriods,
+        today: todayStr,
+      });
+      const category: DayCategory = (status && CATEGORY_OF[status]) || 'off';
+      return { emp, rec, leave, category, shift, status };
+    })
+    .filter((row) => row.status !== null);
 
   const countOf = (c: DayCategory) => dayRows.filter((r) => r.category === c).length;
   const lateTodayCount = countOf('late');
   const presentTodayCount = countOf('present') + lateTodayCount;
   const onLeaveTodayCount = countOf('leave');
+  const dutyTodayCount = countOf('duty');
   const absentTodayCount = countOf('absent');
   const notMarkedCount = countOf('notMarked');
   const offCount = countOf('off');
@@ -849,7 +874,7 @@ export const DashboardPage: React.FC<DashboardProps> = ({
           {
             label: 'On Leave',
             value: String(onLeaveTodayCount),
-            hint: 'Approved absences',
+            hint: dutyTodayCount ? `+${dutyTodayCount} on duty / WFH / suspended` : 'Approved absences',
             icon: CalendarCheck,
             iconCls: 'text-sky-500',
             valueCls: 'text-sky-600 dark:text-sky-400',
@@ -922,6 +947,7 @@ export const DashboardPage: React.FC<DashboardProps> = ({
                 ['present', drillCatCount('present')],
                 ['late', drillCatCount('late')],
                 ['leave', drillCatCount('leave')],
+                ...(dutyTodayCount ? [['duty', drillCatCount('duty')]] : []),
                 ['absent', drillCatCount('absent')],
                 ...(notMarkedCount ? [['notMarked', drillCatCount('notMarked')]] : []),
               ] as [Exclude<DayCategory, 'off'>, number][]
@@ -1004,7 +1030,7 @@ export const DashboardPage: React.FC<DashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
-                  {drillRows.map(({ emp, rec, leave, category, unmarked }, i) => (
+                  {drillRows.map(({ emp, rec, leave, category, status }, i) => (
                     <React.Fragment key={emp.id}>
                     {!drillDept && emp.department !== drillRows[i - 1]?.emp.department && (
                       <tr className="bg-neutral-50/80 dark:bg-neutral-800/50">
@@ -1049,7 +1075,7 @@ export const DashboardPage: React.FC<DashboardProps> = ({
                             Not marked
                           </span>
                         ) : (
-                          <Badge status={rec?.status || unmarked} />
+                          <Badge status={status || ''} />
                         )}
                       </td>
                     </tr>
@@ -1341,7 +1367,7 @@ export const DashboardPage: React.FC<DashboardProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
-              {dayRows.slice(0, 8).map(({ emp, rec, category, shift, unmarked }) => {
+              {dayRows.slice(0, 8).map(({ emp, rec, category, shift, status }) => {
                 return (
                   <tr
                     key={emp.id}
@@ -1375,7 +1401,7 @@ export const DashboardPage: React.FC<DashboardProps> = ({
                           Not marked
                         </span>
                       ) : (
-                        <Badge status={rec?.status || unmarked} />
+                        <Badge status={status || ''} />
                       )}
                     </td>
                     <td className="py-3 px-4 text-neutral-400 text-[11px] truncate max-w-xs">

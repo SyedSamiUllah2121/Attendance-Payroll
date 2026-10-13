@@ -16,6 +16,7 @@ import { AnalyticsPage } from './views/AnalyticsPage';
 import { ShiftsPage } from './views/ShiftsPage';
 import { HolidaysPage } from './views/HolidaysPage';
 import { ReportsPage } from './views/ReportsPage';
+import { SitesPage } from './views/SitesPage';
 import { SettingsPage } from './views/SettingsPage';
 import { UsersPage } from './views/UsersPage';
 
@@ -65,6 +66,7 @@ const SignedInApp: React.FC = () => {
         {page === 'analytics' && <AnalyticsPage />}
         {page === 'shifts' && <ShiftsPage />}
         {page === 'holidays' && <HolidaysPage />}
+        {page === 'sites' && <SitesPage />}
         {page === 'reports' && <ReportsPage />}
         {page === 'users' && <UsersPage />}
         {page === 'settings' && <SettingsPage />}

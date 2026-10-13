@@ -1,4 +1,12 @@
-import { AttendanceStatus, Holiday, LeaveRequest, Shift } from '../types';
+import {
+  AttendanceRecord,
+  AttendanceStatus,
+  DutyPeriod,
+  DutyPeriodType,
+  Holiday,
+  LeaveRequest,
+  Shift,
+} from '../types';
 import { getDay, parse, differenceInMinutes } from 'date-fns';
 import { todayStr } from './dateUtils';
 
@@ -193,7 +201,51 @@ export function calculateEffectiveLeaveDays(
 }
 
 /** What a day with no saved attendance record means for an employee. */
-export type UnmarkedDayStatus = 'Holiday' | 'Weekend' | 'On Leave' | 'Absent' | 'Pending' | 'Upcoming' | 'Not Joined';
+export type UnmarkedDayStatus =
+  | 'Holiday'
+  | 'Weekend'
+  | 'On Leave'
+  | DutyStatus
+  | 'Absent'
+  | 'Pending'
+  | 'Upcoming'
+  | 'Not Joined'
+  | 'Exited';
+
+/** Attendance status a duty period gives each day it covers. */
+export type DutyStatus = 'On Duty' | 'WFH' | 'Suspended';
+
+export const DUTY_STATUS: Record<DutyPeriodType, DutyStatus> = {
+  'Field Duty': 'On Duty',
+  WFH: 'WFH',
+  Suspension: 'Suspended',
+};
+
+export const DUTY_STATUSES: AttendanceStatus[] = ['On Duty', 'WFH', 'Suspended'];
+
+/** True when the period covers dateStr (an open period has no end date). */
+export const periodCovers = (p: DutyPeriod, dateStr: string) =>
+  p.startDate <= dateStr && (!p.endDate || p.endDate >= dateStr);
+
+/** The employee's duty period covering dateStr, if any. */
+export const dutyPeriodOn = (employeeId: string, dateStr: string, periods: DutyPeriod[]) =>
+  periods.find((p) => p.employeeId === employeeId && periodCovers(p, dateStr));
+
+/** On staff that day: joined, and not past their last working day. */
+export const isEmployedOn = (
+  employee: { joiningDate?: string; lastWorkingDay?: string },
+  dateStr: string
+) =>
+  (!employee.joiningDate || employee.joiningDate <= dateStr) &&
+  (!employee.lastWorkingDay || dateStr <= employee.lastWorkingDay);
+
+/** True once the shift's start plus grace time has passed (today's unmarked staff then count as absent). */
+export function isPastGrace(shift: Shift | undefined, now: Date = new Date()): boolean {
+  if (!shift) return false;
+  const [h, m] = shift.startTime.split(':').map(Number);
+  const grace = shift.gracePeriodMinutes ?? shift.graceMinutes ?? 0;
+  return now.getHours() * 60 + now.getMinutes() > (h || 0) * 60 + (m || 0) + grace;
+}
 
 /** True when the employee has approved leave covering dateStr. */
 export function hasApprovedLeaveOn(employeeId: string, dateStr: string, leaves: LeaveRequest[]): boolean {
@@ -207,24 +259,77 @@ export function hasApprovedLeaveOn(employeeId: string, dateStr: string, leaves: 
 }
 
 /**
- * Status of a day that has no attendance record: a holiday, off day, approved leave,
- * or, on a past working day, Absent. Today is Pending (not checked in yet) and later days Upcoming.
+ * Status of a day that has no attendance record. First match wins:
+ * before joining / after the last working day, holiday, shift off day, approved leave,
+ * duty period (Field Duty / WFH / Suspension), then by date: later days Upcoming,
+ * today Pending (not checked in yet) and a past working day Absent.
+ *
+ * Holidays and off days come before leave and duty periods: leave balances and payroll
+ * both count working days, so a suspension over a weekend docks only the working days.
  */
 export function resolveUnmarkedDay(
-  employee: { id: string; joiningDate?: string },
+  employee: { id: string; joiningDate?: string; lastWorkingDay?: string },
   shift: Shift | undefined,
   dateStr: string,
   holidays: Holiday[],
   leaves: LeaveRequest[],
-  today: string = todayStr()
+  today: string = todayStr(),
+  dutyPeriods: DutyPeriod[] = []
 ): UnmarkedDayStatus {
   if (employee.joiningDate && dateStr < employee.joiningDate) return 'Not Joined';
+  if (employee.lastWorkingDay && dateStr > employee.lastWorkingDay) return 'Exited';
   if (holidays.some((h) => h.date === dateStr)) return 'Holiday';
   const dow = new Date(dateStr + 'T00:00:00').getDay();
   const workingDays = shift?.workingDays ?? [1, 2, 3, 4, 5];
   if (!workingDays.includes(dow)) return 'Weekend';
   if (hasApprovedLeaveOn(employee.id, dateStr, leaves)) return 'On Leave';
+  const period = dutyPeriodOn(employee.id, dateStr, dutyPeriods);
+  if (period) return DUTY_STATUS[period.type];
   if (dateStr > today) return 'Upcoming';
   if (dateStr === today) return 'Pending';
   return 'Absent';
+}
+
+/** What the Attendance page, Dashboard and Payroll show for one employee-day. */
+export type DayStatus = AttendanceStatus | 'Not Marked' | 'Upcoming';
+
+export interface DayContext {
+  holidays: Holiday[];
+  leaves: LeaveRequest[];
+  dutyPeriods: DutyPeriod[];
+  today?: string;
+  /** Clock used to turn today's "Not Marked" into Absent after the shift's grace time. */
+  now?: Date;
+}
+
+/**
+ * The central status of an employee on a date. First match wins:
+ * 1. a check-in or manual mark (any record a person saved),
+ * 2. not employed that day (before joining / after last working day): null, not listed,
+ * 3. the auto-filled record for the day, else the same rules applied live
+ *    (holiday, off day, approved leave, duty period),
+ * 4. otherwise "Not Marked" today, becoming Absent once the shift's grace time has passed.
+ * Pass the shift the employee was on that day (see makeEmployeeOnDate).
+ */
+export function resolveDayStatus(
+  employee: { id: string; joiningDate?: string; lastWorkingDay?: string },
+  shift: Shift | undefined,
+  dateStr: string,
+  record: AttendanceRecord | undefined,
+  ctx: DayContext
+): DayStatus | null {
+  if (record && !record.autoMarked) return record.status;
+  if (!isEmployedOn(employee, dateStr)) return null;
+  if (record) return record.status;
+  const today = ctx.today ?? todayStr();
+  const status = resolveUnmarkedDay(employee, shift, dateStr, ctx.holidays, ctx.leaves, today, ctx.dutyPeriods);
+  switch (status) {
+    case 'Not Joined':
+    case 'Exited':
+      return null;
+    case 'Pending':
+      return isPastGrace(shift, ctx.now) ? 'Absent' : 'Not Marked';
+    default:
+      return status;
+  }
 }

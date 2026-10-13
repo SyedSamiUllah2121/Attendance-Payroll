@@ -103,7 +103,8 @@ export function calculateAttendanceKPIs(
   const checkOutMinsArray: number[] = [];
 
   workRecords.forEach((r) => {
-    if (r.status === 'Present') presentCount++;
+    // Field duty and work from home are attended days
+    if (r.status === 'Present' || r.status === 'On Duty' || r.status === 'WFH') presentCount++;
     else if (r.status === 'Late') {
       presentCount++;
       lateCount++;

@@ -49,6 +49,72 @@ export interface Employee {
   status: EmployeeStatus;
   avatar?: string;
   basicSalary: number;
+  /** Work site (e.g. Dubai, London). Optional: older records have none. */
+  siteId?: string;
+  /** Set by the Exit action. The employee drops off attendance after this day and turns Inactive. */
+  lastWorkingDay?: string; // YYYY-MM-DD
+  exitType?: ExitType;
+  exitReason?: string;
+}
+
+export type ExitType = 'Resigned' | 'Terminated';
+
+/** A work location (office / branch) employees are assigned to. */
+export interface Site {
+  id: string;
+  name: string; // e.g. Dubai
+  country: string;
+  address?: string;
+  status: 'Active' | 'Inactive';
+}
+
+export type EmployeeHistoryType = 'Transfer' | 'Promotion' | 'Salary Revision' | 'Status Change' | 'Exit';
+
+/** The employee fields a history row can change. */
+export type EmployeeHistoryValues = Partial<
+  Pick<
+    Employee,
+    | 'department'
+    | 'designation'
+    | 'shiftId'
+    | 'siteId'
+    | 'basicSalary'
+    | 'status'
+    | 'lastWorkingDay'
+    | 'exitType'
+    | 'exitReason'
+  >
+>;
+
+/** One change to an employee (employee_history). */
+export interface EmployeeHistoryEntry {
+  id: string;
+  employeeId: string;
+  type: EmployeeHistoryType;
+  effectiveDate: string; // YYYY-MM-DD
+  oldValue: EmployeeHistoryValues;
+  newValue: EmployeeHistoryValues;
+  note?: string;
+  createdBy: string;
+  createdAt: string; // ISO timestamp
+  /** When newValue was written to the employee record. Unset while the effective date is still ahead. */
+  appliedAt?: string;
+}
+
+export type DutyPeriodType = 'Field Duty' | 'WFH' | 'Suspension';
+
+/** A date range that sets attendance for an employee (employee_duty_periods). */
+export interface DutyPeriod {
+  id: string;
+  employeeId: string;
+  type: DutyPeriodType;
+  startDate: string; // YYYY-MM-DD
+  /** Null while the period is still running. */
+  endDate: string | null;
+  note?: string;
+  createdBy: string;
+  createdAt: string; // ISO timestamp
+  endedBy?: string;
 }
 
 export interface Shift {
@@ -72,7 +138,10 @@ export type AttendanceStatus =
   | 'Absent'
   | 'On Leave'
   | 'Holiday'
-  | 'Weekend';
+  | 'Weekend'
+  | 'On Duty' // Field Duty period
+  | 'WFH'
+  | 'Suspended';
 
 export interface AttendanceRecord {
   id: string;
@@ -173,6 +242,8 @@ export interface PayrollItem {
   employeeId: string;
   employeeName: string;
   department: string;
+  /** Site name at the time payroll was run. */
+  site?: string;
   designation: string;
   basicSalary: number;
   hra: number;
@@ -186,6 +257,10 @@ export interface PayrollItem {
   halfDays: number;
   absentDays: number;
   unpaidLeaveDays: number;
+  /** Working days on Field Duty / WFH (paid) and suspended (unpaid, included in unpaidLeaveDays). */
+  dutyDays?: number;
+  wfhDays?: number;
+  suspendedDays?: number;
   overtimeHours: number;
   overtimePay: number;
   bonus: number;
