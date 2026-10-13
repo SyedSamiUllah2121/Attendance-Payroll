@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Save, Search, RotateCcw, CheckCheck, Info, CalendarPlus, X } from 'lucide-react';
 import { AttendanceRecord, AttendanceStatus, Employee, Holiday, Shift } from '../../types';
 import { storageService } from '../../services/storageService';
@@ -11,7 +11,7 @@ import {
   resolveUnmarkedDay,
 } from '../../utils/attendanceEngine';
 import { makeEmployeeOnDate } from '../../utils/employeeTimeline';
-import { siteNameOf } from '../../utils/sites';
+import { EmployeeSiteSelect } from '../employees/EmployeeSiteSelect';
 import { TimeInput } from '../common/TimeInput';
 import { Modal } from '../common/Modal';
 import { todayStr } from '../../utils/dateUtils';
@@ -95,7 +95,7 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
   const [date, setDate] = useState(today);
   const [dept, setDept] = useState('');
   const [site, setSite] = useState('');
-  const sites = useMemo(() => storageService.getSites(), []);
+  const sites = useMemo(() => storageService.getSites(), [employees]);
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState<Record<string, RowState>>({});
 
@@ -159,8 +159,20 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
     return next;
   };
 
+  // Rebuild when the date or data changes. On the same date, unsaved edits are kept
+  // (e.g. a site change reloads employees while marks are still being entered).
+  const builtForDate = useRef(date);
   useEffect(() => {
-    setRows(buildInitialRows());
+    const fresh = buildInitialRows();
+    const sameDate = builtForDate.current === date;
+    builtForDate.current = date;
+    setRows((prev) => {
+      if (!sameDate) return fresh;
+      Object.keys(fresh).forEach((id) => {
+        if (prev[id]?.dirty) fresh[id] = prev[id];
+      });
+      return fresh;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date, attendance, employees, holidays]);
 
@@ -498,6 +510,7 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
             <thead className="bg-neutral-50 dark:bg-neutral-800/60 text-neutral-500 font-semibold border-b border-neutral-200 dark:border-neutral-800">
               <tr>
                 <th className="py-3 px-4">Employee</th>
+                <th className="py-3 px-4">Site</th>
                 <th className="py-3 px-4">Status</th>
                 <th className="py-3 px-4">Check-In</th>
                 <th className="py-3 px-4">Check-Out</th>
@@ -526,8 +539,11 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
                         {r.dirty && <span className="ml-1.5 text-[10px] text-indigo-600 dark:text-indigo-400">● edited</span>}
                       </p>
                       <span className="text-[11px] text-neutral-400 font-mono">
-                        {emp.id}{siteNameOf(sites, emp.siteId) ? ` · ${siteNameOf(sites, emp.siteId)}` : ''} · {shift.startTime}–{shift.endTime}
+                        {emp.id} · {shift.startTime}–{shift.endTime}
                       </span>
+                    </td>
+                    <td className="py-2.5 px-4">
+                      <EmployeeSiteSelect employee={emp} onChanged={onSaved} />
                     </td>
                     <td className="py-2.5 px-4">
                       <button
@@ -576,7 +592,7 @@ export const MarkAttendanceSheet: React.FC<Props> = ({
               })}
               {visible.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="py-8 text-center text-neutral-400">
+                  <td colSpan={6} className="py-8 text-center text-neutral-400">
                     No active employees match the filters.
                   </td>
                 </tr>

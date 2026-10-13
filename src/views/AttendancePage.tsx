@@ -43,6 +43,7 @@ import {
 import { makeEmployeeOnDate } from '../utils/employeeTimeline';
 import { addDaysStr, todayStr } from '../utils/dateUtils';
 import { siteNameOf } from '../utils/sites';
+import { EmployeeSiteSelect } from '../components/employees/EmployeeSiteSelect';
 
 const TIMED_STATUSES: AttendanceStatus[] = ['Present', 'Late', 'Half Day'];
 
@@ -114,7 +115,7 @@ export const AttendancePage: React.FC = () => {
   const [departmentFilter, setDepartmentFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<DayStatus | ''>('');
   const [siteFilter, setSiteFilter] = useState('');
-  const [sites] = useState(() => storageService.getSites());
+  const [sites, setSites] = useState(() => storageService.getSites());
 
   // Switch tabs when asked while this page is already open (e.g. from the notification bell)
   useEffect(() => {
@@ -184,6 +185,7 @@ export const AttendancePage: React.FC = () => {
     setRegularizations(storageService.getRegularizations());
     setDutyPeriods(storageService.getDutyPeriods());
     setHistory(storageService.getEmployeeHistory());
+    setSites(storageService.getSites());
   };
 
   const shiftOf = (emp?: Employee) => shifts.find((s) => s.id === emp?.shiftId) || shifts[0];
@@ -718,7 +720,11 @@ export const AttendancePage: React.FC = () => {
                         {asOf.department}
                       </td>
                       <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300 whitespace-nowrap">
-                        {siteNameOf(sites, asOf.siteId) || <span className="text-neutral-400">—</span>}
+                        {selectedDate === today && canMark ? (
+                          <EmployeeSiteSelect employee={emp} onChanged={reloadData} />
+                        ) : (
+                          siteNameOf(sites, asOf.siteId) || <span className="text-neutral-400">—</span>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 text-neutral-500 font-mono">
                         {shift ? `${shift.startTime} – ${shift.endTime}` : '09:00 – 18:00'}

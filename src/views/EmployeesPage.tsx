@@ -39,6 +39,7 @@ import { Modal } from '../components/common/Modal';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { LeaveRecordView } from '../components/leave/LeaveRecordView';
 import { EmployeeHistoryView } from '../components/employees/EmployeeHistoryView';
+import { EmployeeSiteSelect } from '../components/employees/EmployeeSiteSelect';
 import { isPeriodRunning, saveEmployeeEdit, setEmployeeStatus } from '../services/employeeActionsService';
 import {
   computeLeaveRecord,
@@ -85,7 +86,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
     exitReason: '',
   });
   const [editExtras, setEditExtras] = useState(blankEditExtras);
-  const [sites] = useState(() => storageService.getSites());
+  const [sites, setSites] = useState(() => storageService.getSites());
   const [selectedSite, setSelectedSite] = useState('');
   const today = todayStr();
 
@@ -152,6 +153,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
     setEmployees(list);
     setDutyPeriods(storageService.getDutyPeriods());
     setHistory(storageService.getEmployeeHistory());
+    setSites(storageService.getSites());
     // Keep an open profile showing the saved record
     setViewingEmployee((cur) => (cur ? list.find((e) => e.id === cur.id) || cur : cur));
   };
@@ -280,6 +282,8 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
       const updated: Employee = {
         ...editingEmployee,
         ...data,
+        // '' = "No site": removes the site (recorded as a Transfer)
+        siteId: formData.siteId,
       };
       const x = editExtras;
       if (x.exitAction && x.exitAction !== 'cancel' && !x.exitReason.trim()) {
@@ -591,7 +595,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
                         <span className="text-[11px] text-neutral-500">{emp.department}</span>
                       </td>
                       <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300 whitespace-nowrap">
-                        {siteNameOf(sites, emp.siteId) || <span className="text-neutral-400">—</span>}
+                        <EmployeeSiteSelect employee={emp} onChanged={loadEmployees} />
                       </td>
                       <td className="py-3.5 px-4 text-neutral-600 dark:text-neutral-300">
                         {shift?.name || 'Standard'}
@@ -995,7 +999,7 @@ export const EmployeesPage: React.FC<EmployeesPageProps> = ({ onOpenPayslip }) =
               formData.department !== editingEmployee.department ||
               formData.designation.trim() !== editingEmployee.designation ||
               formData.shiftId !== editingEmployee.shiftId ||
-              (formData.siteId && formData.siteId !== (editingEmployee.siteId || '')) ||
+              formData.siteId !== (editingEmployee.siteId || '') ||
               Number(formData.basicSalary) !== editingEmployee.basicSalary;
             const running = dutyPeriods.find((p) => p.employeeId === editingEmployee.id && isPeriodRunning(p, today));
             const sectionClass =

@@ -30,9 +30,12 @@ const diff = (emp: Employee, changes: EmployeeHistoryValues) => {
   const newValue: EmployeeHistoryValues = {};
   (Object.keys(changes) as (keyof EmployeeHistoryValues)[]).forEach((key) => {
     const next = changes[key];
-    if (next === undefined || next === '' || next === emp[key]) return;
-    // '' for "none" (e.g. no site yet): JSON drops undefined, and the old value is needed for past dates.
-    (oldValue as Record<string, unknown>)[key] = emp[key] ?? '';
+    // '' stands for "none" (no site); JSON drops undefined, and the old value is needed for past dates.
+    const current = emp[key] ?? '';
+    if (next === undefined || next === current) return;
+    // Only the site can be cleared; an empty department / designation means "no change".
+    if (next === '' && key !== 'siteId') return;
+    (oldValue as Record<string, unknown>)[key] = current;
     (newValue as Record<string, unknown>)[key] = next;
   });
   return { oldValue, newValue, changed: Object.keys(newValue).length > 0 };
